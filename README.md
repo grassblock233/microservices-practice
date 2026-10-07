@@ -112,7 +112,7 @@ cd monolith
 目前的应用启动后可访问以下接口：
 
 | 接口 | 方法 | 访问地址 |
-|---|---|---|---|
+|---|---|---|
 | 问候接口 | GET | http://localhost:8080/api/hello |
 | 健康检查 | GET | http://localhost:8080/actuator/health |
 
