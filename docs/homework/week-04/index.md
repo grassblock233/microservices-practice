@@ -91,3 +91,17 @@ com.zjgsu.lht
 - MySQL 验证：执行建表和初始化 SQL，完成下单后重启应用，确认订单仍可查询。
 
 本周不实现用户、商家、登录认证、支付及完整 CRUD；下单时 `userId` 从请求体传入，仅校验格式并记录，订单列表查询时从查询参数传入作为筛选条件，不查询用户表。本周暂不处理并发下单和重复请求幂等问题。
+
+## 单体应用实现
+
+### 实现思路
+
+基于 `monolith` 中的 Spring Boot 4.0.8 和 JDK 25，已完成菜品查询、学生提交订单、学生订单列表和订单详情四个接口。代码按 Controller、Service、Repository 分层，使用 DTO 接收请求和返回结果，使用 Bean Validation 校验参数，通过统一异常处理返回 `ProblemDetail`。
+
+下单逻辑集中在 `OrderService.createOrder`：先合并重复菜品数量，再校验菜品是否存在、商家归属、上架状态和库存；使用数据库单价与 `BigDecimal` 计算金额，生成 UUID 订单号和 `PENDING_PAYMENT` 状态的订单，保存明细快照并扣减库存。整个过程使用 `@Transactional`，菜品实体的库存修改由 JPA 脏检查写回数据库，任一步骤失败都会回滚订单、明细和库存变更。
+
+数据持久化使用 Spring Data JPA 和 MySQL，实体分别映射到 `dishes`、`orders`、`order_items`。订单详情从订单明细读取名称、单价等历史快照；学生订单列表按创建时间倒序、同一时间按内部 id 倒序返回。建表和示例数据由根目录的 [scripts/init.sql](../../../scripts/init.sql) 提供，该项目不会自动建表。
+
+### 运行命令
+
+运行该项目的方法参见[README.md](../../../README.md)
