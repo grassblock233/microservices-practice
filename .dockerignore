@@ -1,0 +1,44 @@
+# 本地构建产物与缓存
+**/target
+**/build
+**/out
+**/dist
+**/node_modules
+**/*.class
+**/*.jar
+**/*.log
+
+# 版本控制、IDE 和编辑器配置
+.git
+.agents
+.codex
+**/.idea
+**/.vscode
+**/.settings
+**/.classpath
+**/.project
+**/.factorypath
+**/*.iml
+**/*.ipr
+**/*.iws
+**/*~
+**/*.swp
+**/.DS_Store
+
+# 环境变量、凭据和私钥
+**/.env
+**/.env.*
+**/secrets
+**/credentials*
+**/*password*
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.jks
+**/settings.xml
+
+# 镜像构建不需要的文档和数据库脚本（由 Compose 单独挂载）
+docs
+scripts
+README.md

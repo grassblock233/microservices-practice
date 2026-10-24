@@ -107,6 +107,34 @@ cd monolith
 ./mvnw test
 ```
 
+## Docker Compose 运行
+
+在项目根目录执行，需要 Docker Engine 和 Docker Compose：
+
+```bash
+# 仅首次创建；如果已有 .env，请按 .env.example 补齐变量，不要覆盖原配置
+cp -n .env.example .env
+# 编辑 .env，将 DB_PASSWORD 和 MYSQL_ROOT_PASSWORD 改为自己的密码
+docker compose up -d --build
+docker compose ps
+docker compose logs -f app
+```
+
+应用默认地址为 `http://localhost:8080`，可通过 `.env` 中的 `APP_PORT` 修改宿主机端口。
+镜像分为 Maven/JDK 25 构建阶段和 JRE 25 运行阶段；构建时执行自动化测试，运行时使用非 root 用户。
+
+应用与 MySQL 加入同一 `campus-network` 网络，通过服务名 `mysql:3306` 连接；
+`.env` 中的 `DB_HOST`、`DB_PORT` 配置容器内部连接地址，`DB_USERNAME`、`DB_PASSWORD` 配置应用数据库账号。
+请使用普通数据库账号（例如 `campus_app`），不要设置为 `root`；root 密码由 `MYSQL_ROOT_PASSWORD` 单独配置。
+MySQL 不向宿主机映射端口，应用会等待数据库通过实际账号执行 `SELECT 1` 的健康检查后再启动。
+
+首次启动空数据卷时，MySQL 自动执行 `scripts/init.sql`，创建 `campus_takeaway` 的业务表和示例数据；
+数据库名与现有 SQL 保持一致，应用继续使用 `ddl-auto: validate` 校验表结构。
+MySQL 数据保存在命名卷 `mysql-data` 中，执行 `docker compose down` 停止并移除容器后仍会保留。
+初始化 SQL 和数据库账号密码仅在空数据卷初始化时生效；已有数据卷中修改密码需要先在 MySQL 中同步修改。
+`docker compose down -v` 会删除数据卷及全部数据库数据，仅在确认需要清空数据时使用。
+实际 `.env` 不提交 Git，也不会进入 Docker 构建上下文；仓库提供可提交的 `.env.example`。
+
 ## 接口访问地址
 
 目前的应用启动后可访问以下接口：
