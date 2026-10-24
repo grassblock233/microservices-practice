@@ -1,3 +1,21 @@
 spring:
   application:
     name: lht
+
+  datasource:
+    url: ${DB_URL:jdbc:mysql://localhost:3306/campus_takeaway}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+
+  sql:
+    init:
+      mode: never
+
+  jackson:
+    deserialization:
+      accept-float-as-int: false
