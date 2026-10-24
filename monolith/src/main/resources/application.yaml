@@ -1,4 +1,7 @@
 spring:
+  config:
+    import: "optional:file:./.env[.properties],optional:file:./monolith/.env[.properties]"
+
   application:
     name: lht
 
