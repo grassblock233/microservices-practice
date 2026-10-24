@@ -5,6 +5,7 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.*;
 
 import java.math.BigDecimal;
+import java.time.LocalDateTime;
 import java.util.List;
 
 public class OrderDtos {
@@ -26,5 +27,18 @@ public class OrderDtos {
     }
 
     public record Response(String orderNo, BigDecimal totalAmount, OrderStatus status) {
+    }
+
+    public record SummaryResponse(String orderNo, BigDecimal totalAmount, OrderStatus status,
+                                  LocalDateTime createdAt) {
+    }
+
+    public record ItemResponse(Long dishId, String dishName, BigDecimal unitPrice, Integer quantity,
+                               BigDecimal subtotal) {
+    }
+
+    public record DetailResponse(String orderNo, String userId, Long merchantId, BigDecimal totalAmount,
+                                 OrderStatus status, String deliveryAddress, String remark,
+                                 LocalDateTime createdAt, List<ItemResponse> items) {
     }
 }
