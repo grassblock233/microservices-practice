@@ -83,7 +83,7 @@ flowchart TD
 
 ## 运行环境
 
-当前可运行的成果是 `monolith` 目录下的单体应用骨架，技术栈与版本要求如下：
+当前应用位于 `monolith`，已实现菜品查询、订单创建与查询，并使用 MySQL 持久化。直接在本机启动时的环境要求如下：
 
 | 项目 | 要求 |
 |---|---|
@@ -107,33 +107,97 @@ cd monolith
 ./mvnw test
 ```
 
-## Docker Compose 运行
+## Docker 容器化运行（week-05）
 
-在项目根目录执行，需要 Docker Engine 和 Docker Compose：
+以下命令均在仓库根目录执行。需要 Docker Engine 与 Docker Compose v2；镜像构建在 Maven 容器内完成，无需本机安装 Maven 或 Java。
+
+### 配置、构建与启动
 
 ```bash
-# 仅首次创建；如果已有 .env，请按 .env.example 补齐变量，不要覆盖原配置
+# 首次创建配置；已有 .env 时不覆盖
 cp -n .env.example .env
-# 编辑 .env，将 DB_PASSWORD 和 MYSQL_ROOT_PASSWORD 改为自己的密码
+# 用编辑器填写 .env 中的 DB_PASSWORD、MYSQL_ROOT_PASSWORD
+# DB_USERNAME 使用普通数据库账号，不要设置为 root
+
+# 检查配置，再独立构建并查看镜像
+# config --quiet 不输出解析后的密码
+docker compose config --quiet
+docker build -t campus-takeaway:week05 ./monolith
+docker image ls campus-takeaway:week05
+
+# 一键构建并后台启动应用与数据库
 docker compose up -d --build
 docker compose ps
-docker compose logs -f app
+docker compose logs --tail=100 app mysql
 ```
 
-应用默认地址为 `http://localhost:8080`，可通过 `.env` 中的 `APP_PORT` 修改宿主机端口。
-镜像分为 Maven/JDK 25 构建阶段和 JRE 25 运行阶段；构建时执行自动化测试，运行时使用非 root 用户。
+`monolith/Dockerfile` 以 Maven/JDK 25 镜像构建并运行测试，只将生成的 JAR 复制到 JRE 25 运行镜像，使用非 root 用户运行。`monolith/.dockerignore` 排除本地构建产物、IDE 配置与密码文件。
 
-应用与 MySQL 加入同一 `campus-network` 网络，通过服务名 `mysql:3306` 连接；
-`.env` 中的 `DB_HOST`、`DB_PORT` 配置容器内部连接地址，`DB_USERNAME`、`DB_PASSWORD` 配置应用数据库账号。
-请使用普通数据库账号（例如 `campus_app`），不要设置为 `root`；root 密码由 `MYSQL_ROOT_PASSWORD` 单独配置。
-MySQL 不向宿主机映射端口，应用会等待数据库通过实际账号执行 `SELECT 1` 的健康检查后再启动。
+Compose 的构建上下文为 `./monolith`，应用镜像为 `campus-takeaway:week05`。`app` 与 `mysql` 共享 `campus-network`，应用通过服务名 `mysql:3306` 连接数据库。MySQL 使用 `8.4.11`，通过业务账号执行 `SELECT 1` 检查健康，应用等待数据库健康后启动。
 
-首次启动空数据卷时，MySQL 自动执行 `scripts/init.sql`，创建 `campus_takeaway` 的业务表和示例数据；
-数据库名与现有 SQL 保持一致，应用继续使用 `ddl-auto: validate` 校验表结构。
-MySQL 数据保存在命名卷 `mysql-data` 中，执行 `docker compose down` 停止并移除容器后仍会保留。
-初始化 SQL 和数据库账号密码仅在空数据卷初始化时生效；已有数据卷中修改密码需要先在 MySQL 中同步修改。
-`docker compose down -v` 会删除数据卷及全部数据库数据，仅在确认需要清空数据时使用。
-实际 `.env` 不提交 Git，也不会进入 Docker 构建上下文；仓库提供可提交的 `.env.example`。
+| 变量 | 用途 |
+|---|---|
+| `APP_PORT` | 宿主机映射端口，默认 8080 |
+| `DB_HOST` / `DB_PORT` | 容器内部数据库地址，保持 `mysql` / `3306` |
+| `DB_USERNAME` / `DB_PASSWORD` | 自动创建的普通数据库账号及应用连接凭据 |
+| `MYSQL_ROOT_PASSWORD` | MySQL root 密码，与应用账号独立 |
+
+数据库名为 `campus_takeaway`。首次使用空数据卷启动时，MySQL 执行 `scripts/init.sql`，创建业务表与示例菜品。已有数据卷不会重新执行初始化脚本；修改 `.env` 中的密码不会自动修改已有数据库用户密码。实际 `.env` 被 Git 忽略，不应提交。
+
+### 健康检查与业务 API
+
+以下示例使用 Bash，在同一个终端依次执行。默认端口为 8080；若修改了 `.env` 中的 `APP_PORT`，同步修改 `BASE_URL`。应用启动需要时间，健康接口返回 HTTP 200 且 `status` 为 `UP` 后再执行业务请求。
+
+```bash
+BASE_URL=http://localhost:8080
+curl -i "$BASE_URL/actuator/health"
+
+# 查询商家 10 的上架菜品，预期 HTTP 200
+curl -i "$BASE_URL/api/dishes?merchantId=10"
+
+# 创建订单，预期 HTTP 201、totalAmount 为 25.00、status 为 PENDING_PAYMENT
+# 初始菜品 1 的库存有限，重复运行会扣减库存
+curl -i -X POST "$BASE_URL/api/orders" \
+  -H 'Content-Type: application/json' \
+  -d '{"userId":"student-1","merchantId":10,"items":[{"dishId":1,"quantity":2}],"deliveryAddress":"学生宿舍 1 幢 101 室","remark":"少辣"}'
+
+# 输入本次创建响应中的 orderNo（不要使用初始化数据中的固定订单号）
+read -r -p '粘贴刚创建的 orderNo: ' ORDER_NO
+curl -i "$BASE_URL/api/orders/$ORDER_NO"
+```
+
+订单查询预期 HTTP 200，订单号、金额、状态、配送地址与明细应与创建结果一致。
+
+### 数据持久化验证与停止
+
+继续使用上一步终端中的 `BASE_URL` 和 `ORDER_NO`：
+
+```bash
+# 保存重建前的业务响应，临时目录由系统分配
+VERIFY_DIR=$(mktemp -d)
+curl -fSs "$BASE_URL/api/orders/$ORDER_NO" -o "$VERIFY_DIR/before.json"
+cat "$VERIFY_DIR/before.json"
+
+# 停止并删除容器、网络；命名数据卷保留
+docker compose down
+docker compose up -d
+docker compose ps
+
+# 等待健康接口返回 200 和 UP；尚未就绪时稍后重试
+curl -i "$BASE_URL/actuator/health"
+
+# 应用就绪后，查询同一条记录并比较重建前后的完整 JSON
+curl -i "$BASE_URL/api/orders/$ORDER_NO"
+curl -fSs "$BASE_URL/api/orders/$ORDER_NO" -o "$VERIFY_DIR/after.json"
+diff -u "$VERIFY_DIR/before.json" "$VERIFY_DIR/after.json"
+
+# 验证结束后停止服务
+docker compose down
+```
+
+`diff` 无输出且退出码为 0 表示两份响应一致；只有前后查询均成功时才能判定验证通过。MySQL 数据挂载到命名卷 `mysql-data` 的 `/var/lib/mysql`，因此删除并重建容器后仍可读取原数据。持久化验证期间不要执行 `docker compose down -v`，它会删除数据卷。
+
+本周配置说明、历史截图和当前版本待运行项目见 [week-05 实践记录](docs/homework/week-05/index.md)。本次目录调整后的镜像构建与运行结果需实际执行后补充。
 
 ## 接口访问地址
 
@@ -143,6 +207,10 @@ MySQL 数据保存在命名卷 `mysql-data` 中，执行 `docker compose down` �
 |---|---|---|
 | 问候接口 | GET | http://localhost:8080/api/hello |
 | 健康检查 | GET | http://localhost:8080/actuator/health |
+| 菜品查询 | GET | http://localhost:8080/api/dishes?merchantId=10 |
+| 创建订单 | POST | http://localhost:8080/api/orders |
+| 学生订单列表 | GET | http://localhost:8080/api/orders?userId=student-1 |
+| 订单详情 | GET | http://localhost:8080/api/orders/{orderNo} |
 
 ## 当前项目范围
 
@@ -152,12 +220,13 @@ MySQL 数据保存在命名卷 `mysql-data` 中，执行 `docker compose down` �
 - 设计主要用户角色、权限边界和需求
 - 设计功能模块、核心业务流程和订单状态
 - 完成 [项目提案](docs/project-proposal.md)：项目名称、目标用户、优先业务场景与订单、菜品两个核心模型
-- 搭建 `monolith` 单体应用骨架：`LhtApplication` 启动类、`HelloController` 问候接口、actuator 健康检查，并跑通启动与测试命令
+- 实现 `monolith` 单体应用、问候接口、actuator 健康检查、菜品查询、订单创建、学生订单列表与订单详情
+- 使用 MySQL 与 Spring Data JPA 持久化订单及明细，并提供容器化配置
 - 规划后续数据库、服务拆分、认证、消息、事务、监控和部署方向
 
 ### 尚未实现的业务能力
 
-[功能模块划分](#功能模块划分) 中列出的业务模块目前均未实现，代码中只有最基本的问候接口与健康检查：
+[功能模块划分](#功能模块划分) 为完整规划，目前仅实现菜品查询和订单创建、查询等基础能力，登录认证、商家管理、支付及配送等模块仍待实现。
 
 此外，以下能力也不在本课程当前实现范围内：
 
@@ -176,7 +245,3 @@ MySQL 数据保存在命名卷 `mysql-data` 中，执行 `docker compose down` �
 2. 以订单状态流转和配送协作作为核心业务
 3. 支付、地图、消息等能力初期可用模拟实现
 4. 架构从单体开始，后续按课程任务逐步拆分和增强
-
-
-
-@TODO 在 README 中补充启动命令和至少 2 个可直接运行的 curl 示例。

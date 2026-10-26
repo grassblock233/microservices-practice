@@ -25,8 +25,9 @@ services:
       start_period: 30s
 
   app:
+    image: campus-takeaway:week05
     build:
-      context: .
+      context: ./monolith
       dockerfile: Dockerfile
     ports:
       - "${APP_PORT:-8080}:8080"

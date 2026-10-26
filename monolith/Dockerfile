@@ -1,8 +1,8 @@
 FROM maven:3.9.16-eclipse-temurin-25 AS builder
 WORKDIR /build
 
-COPY monolith/pom.xml ./pom.xml
-COPY monolith/src ./src
+COPY pom.xml ./pom.xml
+COPY src ./src
 RUN mvn -B -ntp clean package
 
 FROM eclipse-temurin:25.0.4.1_1-jre
