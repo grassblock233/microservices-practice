@@ -8,7 +8,7 @@
         <version>4.0.8</version>
         <relativePath/> <!-- lookup parent from repository -->
     </parent>
-    <groupId>com.zjgsu</groupId>
+    <groupId>com.zjgsu.lht</groupId>
     <artifactId>lht</artifactId>
     <version>0.0.1-SNAPSHOT</version>
     <name/>
