@@ -1,17 +1,16 @@
 name: campus-takeaway
 
 services:
-  mysql:
+  user-db:
     image: mysql:8.4.11
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
-      # 与 scripts/init.sql 中的数据库名保持一致。
-      MYSQL_DATABASE: campus_takeaway
-      MYSQL_USER: ${DB_USERNAME:?Set DB_USERNAME in .env}
-      MYSQL_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      MYSQL_DATABASE: campus_user
+      MYSQL_USER: user_app
+      MYSQL_PASSWORD: ${USER_DB_PASSWORD:?Set USER_DB_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${USER_MYSQL_ROOT_PASSWORD:?Set USER_MYSQL_ROOT_PASSWORD in .env}
     volumes:
-      - mysql-data:/var/lib/mysql
-      - ./scripts/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - user-data:/var/lib/mysql
+      - ./scripts/microservices/user/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
     networks: [campus-network]
     healthcheck:
       test:
@@ -24,25 +23,104 @@ services:
       retries: 20
       start_period: 30s
 
-  app:
-    image: campus-takeaway:week05
+  user-service:
     build:
-      context: ./monolith
-      dockerfile: Dockerfile
-    ports:
-      - "${APP_PORT:-8080}:8080"
+      context: ./services/user-service
+    ports: ["8081:8081"]
     environment:
-      SERVER_PORT: 8080
-      DB_URL: jdbc:mysql://${DB_HOST:-mysql}:${DB_PORT:-3306}/campus_takeaway
-      DB_USERNAME: ${DB_USERNAME:?Set DB_USERNAME in .env}
-      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      SERVER_PORT: 8081
+      DB_URL: jdbc:mysql://user-db:3306/campus_user
+      DB_USERNAME: user_app
+      DB_PASSWORD: ${USER_DB_PASSWORD:?Set USER_DB_PASSWORD in .env}
     depends_on:
-      mysql:
+      user-db:
+        condition: service_healthy
+    networks: [campus-network]
+
+  dish-db:
+    image: mysql:8.4.11
+    environment:
+      MYSQL_DATABASE: campus_dish
+      MYSQL_USER: dish_app
+      MYSQL_PASSWORD: ${DISH_DB_PASSWORD:?Set DISH_DB_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${DISH_MYSQL_ROOT_PASSWORD:?Set DISH_MYSQL_ROOT_PASSWORD in .env}
+    volumes:
+      - dish-data:/var/lib/mysql
+      - ./scripts/microservices/dish/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    networks: [campus-network]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          MYSQL_PWD="$${MYSQL_PASSWORD}" mysql --protocol=TCP -h 127.0.0.1
+          -u"$${MYSQL_USER}" "$${MYSQL_DATABASE}" -e 'SELECT 1'
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  dish-service:
+    build:
+      context: ./services/dish-service
+    ports: ["8082:8082"]
+    environment:
+      SERVER_PORT: 8082
+      DB_URL: jdbc:mysql://dish-db:3306/campus_dish
+      DB_USERNAME: dish_app
+      DB_PASSWORD: ${DISH_DB_PASSWORD:?Set DISH_DB_PASSWORD in .env}
+    depends_on:
+      dish-db:
+        condition: service_healthy
+    networks: [campus-network]
+
+  order-db:
+    image: mysql:8.4.11
+    environment:
+      MYSQL_DATABASE: campus_order
+      MYSQL_USER: order_app
+      MYSQL_PASSWORD: ${ORDER_DB_PASSWORD:?Set ORDER_DB_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${ORDER_MYSQL_ROOT_PASSWORD:?Set ORDER_MYSQL_ROOT_PASSWORD in .env}
+    volumes:
+      - order-data:/var/lib/mysql
+      - ./scripts/microservices/order/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    networks: [campus-network]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          MYSQL_PWD="$${MYSQL_PASSWORD}" mysql --protocol=TCP -h 127.0.0.1
+          -u"$${MYSQL_USER}" "$${MYSQL_DATABASE}" -e 'SELECT 1'
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  order-service:
+    build:
+      context: ./services/order-service
+    ports: ["8083:8083"]
+    environment:
+      SERVER_PORT: 8083
+      DB_URL: jdbc:mysql://order-db:3306/campus_order
+      DB_USERNAME: order_app
+      DB_PASSWORD: ${ORDER_DB_PASSWORD:?Set ORDER_DB_PASSWORD in .env}
+      USER_SERVICE_URL: http://user-service:8081
+      DISH_SERVICE_URL: http://dish-service:8082
+      HTTP_CONNECT_TIMEOUT: ${HTTP_CONNECT_TIMEOUT:-2s}
+      HTTP_READ_TIMEOUT: ${HTTP_READ_TIMEOUT:-5s}
+    depends_on:
+      order-db:
+        condition: service_healthy
+      user-service:
+        condition: service_healthy
+      dish-service:
         condition: service_healthy
     networks: [campus-network]
 
 volumes:
-  mysql-data:
+  user-data:
+  dish-data:
+  order-data:
 
 networks:
   campus-network:

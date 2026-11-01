@@ -1,0 +1,17 @@
+spring:
+  datasource:
+    # 为每个 Spring 测试上下文使用独立数据库
+    url: jdbc:h2:mem:${random.uuid};MODE=MySQL;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    open-in-view: false
+  sql:
+    init:
+      mode: never
+  jackson:
+    deserialization:
+      accept-float-as-int: false

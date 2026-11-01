@@ -81,136 +81,136 @@ flowchart TD
     O --> P["订单完成"]
 ```
 
-## 运行环境
+## 当前实现与目录
 
-当前应用位于 `monolith`，已实现菜品查询、订单创建与查询，并使用 MySQL 持久化。直接在本机启动时的环境要求如下：
+默认入口为三个微服务，`monolith/` 为原单体应用。
 
-| 项目 | 要求 |
-|---|---|
-| JDK | 25 |
-| Maven | 3.9+（仓库自带3.9.16版本） |
-| Spring Boot | 4.0.8 |
-| 端口 | 8080 |
+| 服务 | 宿主机端口 | 职责 | 独立数据库 / 账号 |
+|---|---|---|---|
+| `user-service` | 8081 | 用户查询，返回有效或禁用状态 | `campus_user` / `user_app` |
+| `dish-service` | 8082 | 菜品查询、批量校验、库存扣减与释放 | `campus_dish` / `dish_app` |
+| `order-service` | 8083 | HTTP 编排下单、保存订单快照、订单查询与失败记录 | `campus_order` / `order_app` |
 
-
-## 启动与测试命令
-
-以下命令均在 `monolith` 目录下执行：
-
-```bash
-cd monolith
-
-# 启动应用（前台运行，Ctrl+C 停止）
-./mvnw spring-boot:run
-
-# 运行测试
-./mvnw test
+```text
+monolith/                       原单体工程
+services/{user,dish,order}-service/  三个独立 Spring Boot 工程
+compose.yaml                    默认：三个应用 + 三个 MySQL
+compose.monolith.yaml           单体应用 + 原 MySQL
+scripts/microservices/          各服务的独立初始化 SQL
+scripts/smoke-test.sh            健康与跨服务业务验证
+docs/microservices-design.md     拆分设计
+docs/homework/week-06/           本周实践与验收记录
 ```
 
-## Docker 容器化运行（week-05）
+## Docker 部署与测试
 
-以下命令均在仓库根目录执行。需要 Docker Engine 与 Docker Compose v2；镜像构建在 Maven 容器内完成，无需本机安装 Maven 或 Java。
-
-### 配置、构建与启动
+以下命令均在仓库根目录执行。需要 Docker Engine、支持 `--wait` 的 Docker Compose，以及用于冒烟测试的 `curl`、`python3`。镜像内的 Maven/JDK 完成构建和测试，本机无需安装 Java 或 Maven。
 
 ```bash
-# 首次创建配置；已有 .env 时不覆盖
 cp -n .env.example .env
-# 用编辑器填写 .env 中的 DB_PASSWORD、MYSQL_ROOT_PASSWORD
-# DB_USERNAME 使用普通数据库账号，不要设置为 root
+# 需在 .env 中填写相关环境变量
 
-# 检查配置，再独立构建并查看镜像
-# config --quiet 不输出解析后的密码
-docker compose config --quiet
-docker build -t campus-takeaway:week05 ./monolith
-docker image ls campus-takeaway:week05
-
-# 一键构建并后台启动应用与数据库
-docker compose up -d --build
-docker compose ps
-docker compose logs --tail=100 app mysql
+sudo docker compose config --quiet
+sudo docker compose up -d --build --wait
+sudo docker compose ps
+bash scripts/smoke-test.sh
 ```
 
-`monolith/Dockerfile` 以 Maven/JDK 25 镜像构建并运行测试，只将生成的 JAR 复制到 JRE 25 运行镜像，使用非 root 用户运行。`monolith/.dockerignore` 排除本地构建产物、IDE 配置与密码文件。
+三个 MySQL 使用 `mysql:8.4.11`，数据库端口只在容器网络中开放。所有服务加入 `campus-network`；订单通过 `user-service:8081`、`dish-service:8082` 调用依赖，应用分别连接 `user-db`、`dish-db`、`order-db`。
 
-Compose 的构建上下文为 `./monolith`，应用镜像为 `campus-takeaway:week05`。`app` 与 `mysql` 共享 `campus-network`，应用通过服务名 `mysql:3306` 连接数据库。MySQL 使用 `8.4.11`，通过业务账号执行 `SELECT 1` 检查健康，应用等待数据库健康后启动。
+MySQL 健康检查使用本实例业务账号执行 `SELECT 1`；应用健康接口检查自身数据库，订单启动时还等待用户、菜品服务健康。初始化 SQL 仅在空卷首次启动时执行。三个命名卷 `user-data`、`dish-data`、`order-data` 分别保存数据库文件。
 
-| 变量 | 用途 |
-|---|---|
-| `APP_PORT` | 宿主机映射端口，默认 8080 |
-| `DB_HOST` / `DB_PORT` | 容器内部数据库地址，保持 `mysql` / `3306` |
-| `DB_USERNAME` / `DB_PASSWORD` | 自动创建的普通数据库账号及应用连接凭据 |
-| `MYSQL_ROOT_PASSWORD` | MySQL root 密码，与应用账号独立 |
+冒烟脚本会实际创建一笔订单并扣减两份库存，默认使用 `student-1`、商家 10、菜品 1。它检查状态码、错误码、订单明细合并、金额、库存变化及失败后的数据，任一断言失败均非零退出。可通过 `USER_BASE_URL`、`DISH_BASE_URL`、`ORDER_BASE_URL`、`SMOKE_USER_ID`、`SMOKE_MERCHANT_ID`、`SMOKE_DISH_ID` 覆盖默认值。
 
-数据库名为 `campus_takeaway`。首次使用空数据卷启动时，MySQL 执行 `scripts/init.sql`，创建业务表与示例菜品。已有数据卷不会重新执行初始化脚本；修改 `.env` 中的密码不会自动修改已有数据库用户密码。实际 `.env` 被 Git 忽略，不应提交。
+## 业务 API
 
-### 健康检查与业务 API
-
-以下示例使用 Bash，在同一个终端依次执行。默认端口为 8080；若修改了 `.env` 中的 `APP_PORT`，同步修改 `BASE_URL`。应用启动需要时间，健康接口返回 HTTP 200 且 `status` 为 `UP` 后再执行业务请求。
-
-```bash
-BASE_URL=http://localhost:8080
-curl -i "$BASE_URL/actuator/health"
-
-# 查询商家 10 的上架菜品，预期 HTTP 200
-curl -i "$BASE_URL/api/dishes?merchantId=10"
-
-# 创建订单，预期 HTTP 201、totalAmount 为 25.00、status 为 PENDING_PAYMENT
-# 初始菜品 1 的库存有限，重复运行会扣减库存
-curl -i -X POST "$BASE_URL/api/orders" \
-  -H 'Content-Type: application/json' \
-  -d '{"userId":"student-1","merchantId":10,"items":[{"dishId":1,"quantity":2}],"deliveryAddress":"学生宿舍 1 幢 101 室","remark":"少辣"}'
-
-# 输入本次创建响应中的 orderNo（不要使用初始化数据中的固定订单号）
-read -r -p '粘贴刚创建的 orderNo: ' ORDER_NO
-curl -i "$BASE_URL/api/orders/$ORDER_NO"
-```
-
-订单查询预期 HTTP 200，订单号、金额、状态、配送地址与明细应与创建结果一致。
-
-### 数据持久化验证与停止
-
-继续使用上一步终端中的 `BASE_URL` 和 `ORDER_NO`：
-
-```bash
-# 保存重建前的业务响应，临时目录由系统分配
-VERIFY_DIR=$(mktemp -d)
-curl -fSs "$BASE_URL/api/orders/$ORDER_NO" -o "$VERIFY_DIR/before.json"
-cat "$VERIFY_DIR/before.json"
-
-# 停止并删除容器、网络；命名数据卷保留
-docker compose down
-docker compose up -d
-docker compose ps
-
-# 等待健康接口返回 200 和 UP；尚未就绪时稍后重试
-curl -i "$BASE_URL/actuator/health"
-
-# 应用就绪后，查询同一条记录并比较重建前后的完整 JSON
-curl -i "$BASE_URL/api/orders/$ORDER_NO"
-curl -fSs "$BASE_URL/api/orders/$ORDER_NO" -o "$VERIFY_DIR/after.json"
-diff -u "$VERIFY_DIR/before.json" "$VERIFY_DIR/after.json"
-
-# 验证结束后停止服务
-docker compose down
-```
-
-`diff` 无输出且退出码为 0 表示两份响应一致；只有前后查询均成功时才能判定验证通过。MySQL 数据挂载到命名卷 `mysql-data` 的 `/var/lib/mysql`，因此删除并重建容器后仍可读取原数据。持久化验证期间不要执行 `docker compose down -v`，它会删除数据卷。
-
-本周配置说明、历史截图和当前版本待运行项目见 [week-05 实践记录](docs/homework/week-05/index.md)。本次目录调整后的镜像构建与运行结果需实际执行后补充。
-
-## 接口访问地址
-
-目前的应用启动后可访问以下接口：
-
-| 接口 | 方法 | 访问地址 |
+| 服务 | 方法和路径 | 用途 |
 |---|---|---|
-| 问候接口 | GET | http://localhost:8080/api/hello |
-| 健康检查 | GET | http://localhost:8080/actuator/health |
-| 菜品查询 | GET | http://localhost:8080/api/dishes?merchantId=10 |
-| 创建订单 | POST | http://localhost:8080/api/orders |
-| 学生订单列表 | GET | http://localhost:8080/api/orders?userId=student-1 |
-| 订单详情 | GET | http://localhost:8080/api/orders/{orderNo} |
+| 各服务 | `GET /actuator/health` | 本服务及其数据库健康 |
+| 用户 :8081 | `GET /api/users/{userId}` | 用户 ID、展示名和状态 |
+| 菜品 :8082 | `GET /api/dishes?merchantId=10` | 商家上架菜品 |
+| 菜品 :8082 | `POST /internal/dishes/validate` | 批量预校验，不扣库存 |
+| 菜品 :8082 | `POST /internal/stock-operations/{orderNo}/deduct` | 原子批量扣减并返回价格快照 |
+| 菜品 :8082 | `PUT /internal/stock-operations/{orderNo}/release` | 幂等释放或保存释放终态 |
+| 菜品 :8082 | `GET /internal/stock-operations/{orderNo}` | 核对操作状态和明细 |
+| 订单 :8083 | `POST /api/orders` | 创建待支付订单 |
+| 订单 :8083 | `GET /api/orders?userId=student-1` | 本地订单列表 |
+| 订单 :8083 | `GET /api/orders/{orderNo}` | 本地历史快照详情 |
+
+订单通过 `RestTemplate` 顺序查询用户、预校验菜品、扣减库存，再提交本地订单事务。总额使用扣减响应的价格快照计算；订单查询只读取本地订单及明细。下单成功返回 201 和 `PENDING_PAYMENT`，用户、菜品不存在返回 404，禁用或业务冲突返回 409，依赖连接失败返回 503，超时返回 504，异常依赖响应返回 502。错误响应使用带稳定 `code` 的 `ProblemDetail`，生成操作号后附带 `orderNo`。
+
+| 环境变量 | 默认值 |
+|---|---|
+| `USER_SERVICE_URL` | `http://user-service:8081` |
+| `DISH_SERVICE_URL` | `http://dish-service:8082` |
+| `HTTP_CONNECT_TIMEOUT` | `2s` |
+| `HTTP_READ_TIMEOUT` | `5s` |
+
+本机直接启动订单应用时，将两个服务地址分别设为 `http://localhost:8081` 和 `http://localhost:8082`，并为各应用提供自己的 `DB_URL`、`DB_USERNAME`、`DB_PASSWORD`。
+
+## 独立工程测试
+
+安装 JDK 25 和 Maven 3.9+ 后，在仓库根目录执行：
+
+```bash
+mvn -f services/user-service/pom.xml test
+mvn -f services/dish-service/pom.xml test
+mvn -f services/order-service/pom.xml test
+```
+
+## 故障演示与恢复
+
+以下为可复现的依赖停止验证步骤，成功启动三个服务后执行：
+
+```bash
+sudo docker compose stop user-service
+curl -i -X POST http://localhost:8083/api/orders \
+  -H 'Content-Type: application/json' \
+  -d '{"userId":"student-1","merchantId":10,"items":[{"dishId":1,"quantity":1}],"deliveryAddress":"故障验证宿舍"}'
+# 预期 503 / DEPENDENCY_UNAVAILABLE，预校验失败，不创建下单记录或业务订单。
+sudo docker compose up -d --wait user-service
+```
+
+将停止和恢复对象改成 `dish-service` 可复现菜品依赖故障。服务恢复后可以重新运行冒烟脚本。运行期失败由 HTTP 客户端处理，启动依赖不会替代业务校验。
+
+库存扣减明确成功而本地订单保存失败时，会出现“远端成功、本地失败”的窗口。订单服务先核对本地提交结果，确认无订单后以同一 `orderNo` 释放库存；释放成功记录 `FAILED`，释放失败或提交结果无法确认记录 `RECOVERY_REQUIRED` 并返回 503。相同操作号不重复扣减或回补；释放先到会保存 `RELEASED` 终态以拒绝迟到扣减。
+
+人工核对时先确认原下单请求已结束，再查询本地订单和库存操作：有有效订单且操作为 `DEDUCTED` 时保留库存扣减；确认无有效订单而操作仍为 `DEDUCTED` 时，通过释放 API 重试补偿，再在订单库记录核对依据及处理结果。订单查询或数据库状态无法确认时继续核对，不直接释放。恢复步骤和边界详见 [设计文档的一致性处理](docs/microservices-design.md#62-失败与补偿)。
+
+## 数据持久化复现
+
+下面使用本次验收订单，比较容器重建前后的同一订单和菜品响应。运行期间不提交其他订单。
+
+```bash
+VERIFY_DIR=$(mktemp -d)
+ORDER_NO=34aace04-b269-4278-89d5-741ff214ca6e
+curl -fSs "http://localhost:8083/api/orders/$ORDER_NO" -o "$VERIFY_DIR/order-before.json"
+curl -fSs 'http://localhost:8082/api/dishes?merchantId=10' -o "$VERIFY_DIR/dishes-before.json"
+sudo docker compose down
+sudo docker compose up -d --wait
+curl -fSs "http://localhost:8083/api/orders/$ORDER_NO" -o "$VERIFY_DIR/order-after.json"
+curl -fSs 'http://localhost:8082/api/dishes?merchantId=10' -o "$VERIFY_DIR/dishes-after.json"
+diff -u "$VERIFY_DIR/order-before.json" "$VERIFY_DIR/order-after.json"
+diff -u "$VERIFY_DIR/dishes-before.json" "$VERIFY_DIR/dishes-after.json"
+```
+
+前后查询均成功且两个 `diff` 无输出时，说明该订单和库存保持一致。普通 `down` 保留三个数据库命名卷；`down -v` 会删除数据卷。停止微服务使用 `sudo docker compose down`。
+
+## 保留的单体版本
+
+`monolith/` 仍包含原源码、POM 和 Dockerfile，原 `scripts/init.sql`、`scripts/reset.sql` 对应 `campus_takeaway`。单体 Compose 入口为 [compose.monolith.yaml](compose.monolith.yaml)，端口默认 8080，沿用命名卷 `mysql-data`。
+
+运行前需在 `.env` 中补充示例文件末尾的 `MYSQL_ROOT_PASSWORD`、`DB_USERNAME`、`DB_PASSWORD`。然后执行：
+
+```bash
+sudo docker compose down
+sudo docker compose -f compose.monolith.yaml config --quiet
+sudo docker compose -f compose.monolith.yaml up -d --build
+curl -i http://localhost:8080/actuator/health
+sudo docker compose -f compose.monolith.yaml down
+```
+
+本机直接运行时配置单体数据库连接，执行 `mvn -f monolith/pom.xml spring-boot:run`；测试命令为 `mvn -f monolith/pom.xml test`。历史容器化记录见 [week-05](docs/homework/week-05/index.md)，当前默认启动流程以本 README 的微服务命令为准。
 
 ## 当前项目范围
 
@@ -222,11 +222,13 @@ docker compose down
 - 完成 [项目提案](docs/project-proposal.md)：项目名称、目标用户、优先业务场景与订单、菜品两个核心模型
 - 实现 `monolith` 单体应用、问候接口、actuator 健康检查、菜品查询、订单创建、学生订单列表与订单详情
 - 使用 MySQL 与 Spring Data JPA 持久化订单及明细，并提供容器化配置
-- 规划后续数据库、服务拆分、认证、消息、事务、监控和部署方向
+- 拆分用户、菜品、订单三个独立应用和数据库，实现 RestTemplate 调用、库存幂等、失败补偿及恢复记录
+- 完成微服务 Compose 部署与健康、成功下单、依赖资源不存在及用户禁用的冒烟验收
+- 规划后续认证、消息、事务恢复和监控方向
 
 ### 尚未实现的业务能力
 
-[功能模块划分](#功能模块划分) 为完整规划，目前仅实现菜品查询和订单创建、查询等基础能力，登录认证、商家管理、支付及配送等模块仍待实现。
+[功能模块划分](#功能模块划分) 为完整规划，目前已实现用户查询、菜品查询、跨服务下单和订单查询等基础能力，登录认证、商家管理、支付及配送等模块仍待实现。
 
 此外，以下能力也不在本课程当前实现范围内：
 

@@ -1,0 +1,27 @@
+server:
+  port: ${SERVER_PORT:8082}
+spring:
+  application:
+    name: dish-service
+  datasource:
+    url: ${DB_URL:jdbc:mysql://dish-db:3306/campus_dish}
+    username: ${DB_USERNAME:dish_app}
+    password: ${DB_PASSWORD}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  sql:
+    init:
+      mode: never
+  jackson:
+    deserialization:
+      accept-float-as-int: false
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: never
