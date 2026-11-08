@@ -1,0 +1,314 @@
+@nacosConsoleUrl = http://localhost:18080/
+@userBaseUrl = http://localhost:8081
+@dishBaseUrl = http://localhost:8082
+@orderBaseUrl = http://localhost:8083
+@smokeUserId = student-1
+@smokeMerchantId = 10
+@smokeDishId = 1
+
+### 01 测试 Nacos 控制台可访问，并初始化本次测试
+< {%
+    [
+        "smoke_userActive", "smoke_beforeDish", "smoke_beforeOrders",
+        "smoke_created", "smoke_orderNo", "smoke_detail",
+        "smoke_afterOrders", "smoke_afterDishes",
+        "smoke_missingUserRejected", "smoke_disabledUserRejected", "smoke_missingDishRejected"
+    ].forEach(name => client.global.clear(name));
+%}
+GET {{nacosConsoleUrl}}
+
+> {%
+    client.test("Nacos 控制台返回 200", () => {
+        client.assert(response.status === 200);
+    });
+%}
+
+### 02 用户服务健康检查
+GET {{userBaseUrl}}/actuator/health
+Accept: application/json
+
+> {%
+    client.test("用户服务健康状态为 UP", () => {
+        client.assert(response.status === 200);
+    });
+%}
+
+### 03 菜品服务健康检查
+GET {{dishBaseUrl}}/actuator/health
+Accept: application/json
+
+> {%
+    client.test("菜品服务健康状态为 UP", () => {
+        client.assert(response.status === 200);
+    });
+%}
+
+### 04 订单服务健康检查
+GET {{orderBaseUrl}}/actuator/health
+Accept: application/json
+
+> {%
+    client.test("订单服务健康状态为 UP", () => {
+        client.assert(response.status === 200);
+    });
+%}
+
+### 05 获取下单用户，确认未被禁用
+GET {{userBaseUrl}}/api/users/{{smokeUserId}}
+Accept: application/json
+
+> {%
+    client.test("下单用户状态为 ACTIVE", () => {
+        client.assert(response.status === 200);
+        client.assert(response.body.status === "ACTIVE", "测试用户不存在或已禁用");
+        client.global.set("smoke_userActive", "true");
+    });
+%}
+
+### 06 确认库存，保存下单前库存状态
+GET {{dishBaseUrl}}/api/dishes?merchantId={{smokeMerchantId}}
+Accept: application/json
+
+> {%
+    client.test("测试菜品已上架且库存至少为 2", () => {
+        client.assert(response.status === 200);
+        const dishId = Number(client.variables.file.get("smokeDishId"));
+        const dish = response.body.find(row => row.id === dishId);
+        client.assert(dish !== undefined && dish.stock >= 2, "测试菜品必须上架且至少剩余两份");
+        client.global.set("smoke_beforeDish", JSON.stringify(dish));
+    });
+%}
+
+### 07 保存下单前订单状态
+GET {{orderBaseUrl}}/api/orders?userId={{smokeUserId}}
+Accept: application/json
+
+> {%
+    client.test("保存下单前订单列表", () => {
+        client.assert(response.status === 200);
+        client.global.set("smoke_beforeOrders", JSON.stringify(response.body));
+    });
+%}
+
+### 08 创建订单(同一id商品两份)
+POST {{orderBaseUrl}}/api/orders
+Content-Type: application/json
+Accept: application/json
+
+{
+  "userId": "{{smokeUserId}}",
+  "merchantId": {{smokeMerchantId}},
+  "items": [
+    {
+      "dishId": {{smokeDishId}},
+      "quantity": 1
+    },
+    {
+      "dishId": {{smokeDishId}},
+      "quantity": 1
+    }
+  ],
+  "deliveryAddress": "test",
+  "remark": "smoke test"
+}
+
+> {%
+    client.test("订单创建成功，订单号为 UUID，状态为待支付", () => {
+        client.assert(response.status === 201);
+        const created = response.body;
+        client.assert(created.status === "PENDING_PAYMENT", "订单状态应为 PENDING_PAYMENT");
+        client.global.set("smoke_created", JSON.stringify(created));
+        client.global.set("smoke_orderNo", created.orderNo);
+        client.log("已创建订单 orderNo=" + created.orderNo);
+    });
+%}
+
+### 09 查询订单详情
+GET {{orderBaseUrl}}/api/orders/{{smoke_orderNo}}
+Accept: application/json
+
+> {%
+    client.test("订单合并", () => {
+        client.assert(response.status === 200);
+        const created = JSON.parse(client.global.get("smoke_created"));
+        const detail = response.body;
+        client.assert(detail.orderNo === created.orderNo, "订单详情的订单号不一致");
+        client.assert(detail.status === created.status && detail.status === "PENDING_PAYMENT", "订单状态不一致");
+        client.assert(Array.isArray(detail.items) && detail.items.length === 1, "重复菜品应合并");
+        const item = detail.items[0];
+        client.assert(item.dishId === Number(client.variables.file.get("smokeDishId")) && item.quantity === 2,
+            "合并后的菜品或数量错误");
+
+        function cents(value) {
+            client.assert(typeof value === "number" && Number.isFinite(value) && value >= 0, "金额必须是非负数");
+            const text = String(value);
+            const parts = text.split(".");
+            const result = Number(parts[0] + ((parts[1] || "") + "00").slice(0, 2));
+            client.assert(Number.isSafeInteger(result), "金额超过 JavaScript 可精确比较的范围");
+            return result;
+        }
+
+        const expected = cents(item.unitPrice) * 2;
+        client.assert(Number.isSafeInteger(expected), "总金额超过 JavaScript 可精确比较的范围");
+        client.assert(cents(created.totalAmount) === expected && cents(detail.totalAmount) === expected &&
+            cents(item.subtotal) === expected, "创建响应、详情总额、单价乘数量和小计应一致");
+        client.global.set("smoke_detail", JSON.stringify(detail));
+    });
+%}
+
+### 10 保存下单后订单列表，确认订单只增加一笔
+GET {{orderBaseUrl}}/api/orders?userId={{smokeUserId}}
+Accept: application/json
+
+> {%
+    client.test("订单数量增加 1，且包含新订单", () => {
+        client.assert(response.status === 200);
+        const before = JSON.parse(client.global.get("smoke_beforeOrders"));
+        client.assert(Array.isArray(response.body) && response.body.length === before.length + 1, "订单数量未增加 1");
+        client.assert(response.body.some(order => order.orderNo === client.global.get("smoke_orderNo")), "订单列表缺少新订单");
+        client.global.set("smoke_afterOrders", JSON.stringify(response.body));
+    });
+%}
+
+### 11 保存下单后菜品列表，确认库存扣减两份
+GET {{dishBaseUrl}}/api/dishes?merchantId={{smokeMerchantId}}
+Accept: application/json
+
+> {%
+    client.test("测试菜品库存恰好扣减 2", () => {
+        client.assert(response.status === 200, "预期 200，实际 " + response.status);
+        const before = JSON.parse(client.global.get("smoke_beforeDish"));
+        const after = response.body.find(row => row.id === before.id);
+        client.assert(after !== undefined && before.stock - after.stock === 2, "库存未恰好扣减两份");
+        client.global.set("smoke_afterDishes", JSON.stringify(response.body));
+        client.log("PASS stock=" + before.stock + "->" + after.stock);
+    });
+%}
+
+### 12 查询库存操作记录，核对扣减状态与价格快照
+GET {{dishBaseUrl}}/internal/stock-operations/{{smoke_orderNo}}
+Accept: application/json
+
+> {%
+    client.test("库存操作为 DEDUCTED，操作号及价格快照与订单一致", () => {
+        client.assert(response.status === 200, "预期 200，实际 " + response.status);
+        const detail = JSON.parse(client.global.get("smoke_detail"));
+        const operation = response.body;
+        client.assert(operation.orderNo === detail.orderNo && operation.status === "DEDUCTED", "库存操作号或状态不一致");
+        client.assert(Array.isArray(operation.items) && operation.items.length === 1, "库存操作应只有一条合并明细");
+        const item = operation.items[0];
+        client.assert(item.dishId === detail.items[0].dishId && item.quantity === 2, "库存操作的菜品或数量不一致");
+        client.assert(item.unitPrice === detail.items[0].unitPrice, "扣减价格快照与订单快照不一致");
+    });
+%}
+
+### 13 用户不存在：预期 404 / USER_NOT_FOUND
+POST {{orderBaseUrl}}/api/orders
+Content-Type: application/json
+Accept: application/json
+
+{
+  "userId": "missing-{{$random.uuid}}",
+  "merchantId": {{smokeMerchantId}},
+  "items": [
+    {
+      "dishId": {{smokeDishId}},
+      "quantity": 1
+    },
+    {
+      "dishId": {{smokeDishId}},
+      "quantity": 1
+    }
+  ],
+  "deliveryAddress": "冒烟测试宿舍",
+  "remark": "week-07 nacos smoke"
+}
+
+> {%
+    client.test("不存在的用户被拒绝", () => {
+        client.assert(response.status === 404);
+        client.assert(response.body.code === "USER_NOT_FOUND");
+        client.global.set("smoke_missingUserRejected", "true");
+    });
+%}
+
+### 14 用户已禁用：预期 409 / USER_DISABLED
+POST {{orderBaseUrl}}/api/orders
+Content-Type: application/json
+Accept: application/json
+
+{
+  "userId": "student-disabled",
+  "merchantId": {{smokeMerchantId}},
+  "items": [
+    {
+      "dishId": {{smokeDishId}},
+      "quantity": 1
+    },
+    {
+      "dishId": {{smokeDishId}},
+      "quantity": 1
+    }
+  ],
+  "deliveryAddress": "test",
+  "remark": "test"
+}
+
+> {%
+    client.test("禁用用户被拒绝", () => {
+        client.assert(response.status === 409);
+        client.assert(response.body.code === "USER_DISABLED");
+        client.global.set("smoke_disabledUserRejected", "true");
+    });
+%}
+
+### 15 菜品不存在：预期 404 / DISH_NOT_FOUND
+POST {{orderBaseUrl}}/api/orders
+Content-Type: application/json
+Accept: application/json
+
+{
+  "userId": "{{smokeUserId}}",
+  "merchantId": {{smokeMerchantId}},
+  "items": [
+    {
+      "dishId": 9223372036854775807,
+      "quantity": 1
+    }
+  ],
+  "deliveryAddress": "test",
+  "remark": "test"
+}
+
+> {%
+    client.test("不存在的菜品被拒绝", () => {
+        client.assert(response.status === 404);
+        client.assert(response.body.code === "DISH_NOT_FOUND");
+        client.global.set("smoke_missingDishRejected", "true");
+    });
+%}
+
+### 16 异常下单后订单列表应完全不变
+GET {{orderBaseUrl}}/api/orders?userId={{smokeUserId}}
+Accept: application/json
+
+> {%
+    client.test("异常请求未产生订单或改变已有订单", () => {
+        client.assert(response.status === 200);
+        client.assert(["smoke_missingUserRejected", "smoke_disabledUserRejected", "smoke_missingDishRejected"]
+            .every(name => client.global.get(name) === "true"), "请先确认三个异常下单场景全部通过");
+        client.assert(JSON.stringify(response.body) === client.global.get("smoke_afterOrders"), "异常请求改变了订单列表");
+    });
+%}
+
+### 17 异常下单后菜品列表应完全不变
+GET {{dishBaseUrl}}/api/dishes?merchantId={{smokeMerchantId}}
+Accept: application/json
+
+> {%
+    client.test("异常请求未改变菜品和库存", () => {
+        client.assert(response.status === 200, "预期 200，实际 " + response.status);
+        client.assert(JSON.stringify(response.body) === client.global.get("smoke_afterDishes"), "异常请求改变了菜品或库存");
+        client.log("PASS rejected requests left inventory unchanged; orderNo=" + client.global.get("smoke_orderNo"));
+    });
+%}
