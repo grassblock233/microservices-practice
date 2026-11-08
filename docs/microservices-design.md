@@ -11,7 +11,7 @@
 | 数据库部署 | 三个独立 MySQL 容器，各有数据库、业务账号及命名数据卷 |
 | 库存行为 | 保留下单扣库存；订单写入失败时同步补偿，补偿失败留痕并人工核对 |
 
-本周实现顺序下单流程、同步 HTTP 通信、基本失败处理和本地容器编排。用户注册登录、权限认证、商家管理、支付、配送、消息队列、服务注册中心、网关及完整分布式事务框架留待后续。`userId` 仍由请求传入，存在性校验不等于身份认证。
+本周实现顺序下单流程、同步 HTTP 通信、Nacos 服务注册与发现、基本失败处理和本地容器编排。用户注册登录、权限认证、商家管理、支付、配送、消息队列、网关及完整分布式事务框架留待后续。`userId` 仍由请求传入，存在性校验不等于身份认证。
 
 ## 2. 单体模块到微服务的映射
 
@@ -96,7 +96,7 @@
     └── microservices-design.md
 ```
 
-每个工程均有独立 `pom.xml`、`src/main/resources/application.yml`、测试配置和至少一个测试；包路径均为 `src/main/java/com/zjgsu/lht/`，分别包含 `controller`、`service`、`repository`、`model`、`dto` 等。订单服务额外包含 `client` 包，封装 `UserClient`、`DishClient` 和 `RestTemplate` 配置。
+每个工程均有独立 `pom.xml`、`src/main/resources/application.yml`、测试配置和至少一个测试；包路径均为 `src/main/java/com/zjgsu/lht/`，分别包含 `controller`、`service`、`repository`、`model`、`dto` 等。订单服务额外包含 `client` 包，封装 `UserClient`、`DishClient`、`ServiceLocator` 和 `RestTemplate` 配置。
 
 三个 POM 分别声明 Web MVC、Validation、Data JPA、Actuator、MySQL 驱动和所需测试依赖，沿用单体技术版本，均可独立构建和运行。每个服务至少有自己的业务 Controller 和 Service，不能仅以 Actuator 代替业务接口。示例为 `UserController/UserService`、`DishController/DishService`、`OrderController/OrderService`。
 
@@ -120,23 +120,28 @@
 
 `/internal/` 表示服务间约定接口，本周不因此假定它已经具有鉴权能力。
 
-### 5.1 RestTemplate 与超时配置
+### 5.1 服务发现、RestTemplate 与超时配置
 
-订单服务的 `application.yml` 至少提供以下配置，由 `@ConfigurationProperties` 绑定；创建 `RestTemplate` 时必须实际将两个超时应用到请求工厂，而不是仅声明配置项。
+三个服务启动后都向 Nacos 注册；订单服务不保存用户、菜品的固定业务地址，并在每次调用前通过 `DiscoveryClient` 获取目标服务的当前实例。三者使用同一命名空间与 `CAMPUS_TAKEAWAY_GROUP` 分组，地址与凭据由环境变量注入。
 
 ```yaml
-server:
-  port: ${SERVER_PORT:8083}
+spring:
+  application:
+    name: order-service
+  cloud:
+    nacos:
+      discovery:
+        server-addr: ${NACOS_SERVER_ADDR:localhost:8848}
+        username: ${NACOS_USERNAME:nacos}
+        password: ${NACOS_PASSWORD:}
+        namespace: ${NACOS_NAMESPACE:}
+        group: CAMPUS_TAKEAWAY_GROUP
 clients:
-  user:
-    base-url: ${USER_SERVICE_URL:http://user-service:8081}
-  dish:
-    base-url: ${DISH_SERVICE_URL:http://dish-service:8082}
   connect-timeout: ${HTTP_CONNECT_TIMEOUT:2s}
   read-timeout: ${HTTP_READ_TIMEOUT:5s}
 ```
 
-以上地址默认适用于 Compose。本机分别运行应用时，显式设置 `USER_SERVICE_URL=http://localhost:8081` 和 `DISH_SERVICE_URL=http://localhost:8082`。容器配置使用 Compose 服务名，不以 `localhost` 访问其他服务。HTTP 客户端不自动重试写请求，不采用默认数据或忽略异常继续下单。
+`ServiceLocator` 每次调用 `DiscoveryClient.getInstances(serviceName)`，取第一个实例的 URI 拼接原业务路径；实例列表为空时抛出声明的寻址异常并映射为 503，不退化为 Compose 服务名或固定地址。创建 `RestTemplate` 时，连接超时要设置到 JDK `HttpClient`，读取超时要设置到 `JdkClientHttpRequestFactory`，不能只声明配置项。Compose 中 `NACOS_SERVER_ADDR=nacos:8848`，宿主机单独运行应用时默认 `localhost:8848`，业务请求不经过 Nacos 转发。HTTP 客户端不自动重试写请求，不采用默认数据或忽略异常继续下单。
 
 ## 6. 顺序下单与基本一致性
 

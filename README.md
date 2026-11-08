@@ -94,33 +94,105 @@ flowchart TD
 ```text
 monolith/                       原单体工程
 services/{user,dish,order}-service/  三个独立 Spring Boot 工程
-compose.yaml                    默认：三个应用 + 三个 MySQL
+compose.yaml                    默认：Nacos + 三个应用 + 三个 MySQL
 compose.monolith.yaml           单体应用 + 原 MySQL
 scripts/microservices/          各服务的独立初始化 SQL
 scripts/smoke-test.sh            健康与跨服务业务验证
 docs/microservices-design.md     拆分设计
-docs/homework/week-06/           本周实践与验收记录
+docs/homework/week-06/           第 06 周拆分实践与验收记录
+docs/homework/week-07/           第 07 周 Nacos 部署与验证记录
 ```
 
 ## Docker 部署与测试
 
-以下命令均在仓库根目录执行。需要 Docker Engine、支持 `--wait` 的 Docker Compose，以及用于冒烟测试的 `curl`、`python3`。镜像内的 Maven/JDK 完成构建和测试，本机无需安装 Java 或 Maven。
+以下命令均在仓库根目录执行。需要 Docker Engine、支持 `--wait` 的 Docker Compose，以及 `openssl`、`curl`、`python3`。镜像内的 Maven/JDK 完成构建和测试，本机无需安装 Java 或 Maven。
+
+### 1. 准备本地配置
 
 ```bash
 cp -n .env.example .env
-# 需在 .env 中填写相关环境变量
+# 分别复制以下命令的输出到 .env 的 NACOS_AUTH_TOKEN 和 NACOS_AUTH_IDENTITY_VALUE
+openssl rand -base64 32
+openssl rand -hex 16
+```
 
+编辑根目录 `.env`，填写以下配置
+
+| 配置 | 填写方式 |
+|---|---|
+| `USER_DB_PASSWORD`、`DISH_DB_PASSWORD`、`ORDER_DB_PASSWORD` | 三个数据库的业务账号密码 |
+| `USER_MYSQL_ROOT_PASSWORD`、`DISH_MYSQL_ROOT_PASSWORD`、`ORDER_MYSQL_ROOT_PASSWORD` | 三个数据库的 root 密码 |
+| `NACOS_AUTH_TOKEN` | 上述 Base64 输出，原始随机内容至少 32 字节 |
+| `NACOS_AUTH_IDENTITY_KEY` | 保留模板中的 `campusTakeawayServerIdentity` 或设置自己的标识 |
+| `NACOS_AUTH_IDENTITY_VALUE` | 上述十六进制随机值 |
+| `NACOS_USERNAME` | 首次使用保留 `nacos` |
+| `NACOS_PASSWORD` | 自行设置，下一步初始化管理员时使用同一密码 |
+| `NACOS_NAMESPACE` | 初次实验留空，使用默认命名空间 |
+
+### 2. 首次启动并初始化 Nacos
+
+```bash
 sudo docker compose config --quiet
+sudo docker compose up -d nacos
+sudo docker compose logs -f nacos
+```
+
+看到服务和控制台启动后，按 `Ctrl+C` 退出日志跟踪（容器仍继续运行），在浏览器打开 [Nacos 控制台](http://localhost:18080/)。首次访问时初始化 `nacos` 管理员密码，**必须与 `.env` 的 `NACOS_PASSWORD` 一致**，然后登录。
+
+`NACOS_PASSWORD` 环境变量用于应用认证和 Compose 的登录健康检查，不会自动初始化管理员。初始化完成前，Nacos 容器可能显示 `unhealthy`；初始化后等待下一次健康检查，用 `sudo docker compose ps` 确认 Nacos 为 `healthy`，再启动全部应用。若持续未就绪，检查日志及管理员密码是否与 `.env` 一致。
+
+| 本机入口 | 容器端口 | 用途 |
+|---|---|---|
+| `http://localhost:18080/` | `8080` | Nacos 3 控制台 |
+| `localhost:8848` | `8848` | 服务端 HTTP API 与客户端寻址 |
+| `localhost:9848` | `9848` | SDK gRPC 通信，不是浏览器页面 |
+
+三个 Nacos 入口均绑定本机回环地址。Nacos 3 控制台使用独立的 `18080` 映射端口，不使用旧版的 `8848/nacos` 控制台地址。
+
+### 3. 启动业务服务并确认注册
+
+```bash
+sudo docker compose up -d --build --wait
+sudo docker compose ps
+sudo docker compose config --services
+```
+
+启动结果应包含 Nacos、`user-service`、`dish-service`、`order-service` 和三个 MySQL，共 7 个服务。三个业务入口分别为 `http://localhost:8081`、`http://localhost:8082`、`http://localhost:8083`，各自提供 `/actuator/health`。
+
+在 Nacos 控制台选择默认命名空间和 **`CAMPUS_TAKEAWAY_GROUP`**，确认三个服务均已注册，实例已启用且健康，地址和业务端口可从消费者容器访问。同一业务服务的多个实例使用相同的 `spring.application.name`。
+
+如使用自定义命名空间，先在控制台创建，再把实际 Namespace ID 填入 `.env` 的 `NACOS_NAMESPACE`，重新执行上述启动命令使三个应用加载配置；在控制台切换到该命名空间查看注册结果。分组仍为 `CAMPUS_TAKEAWAY_GROUP`。
+
+### 4. 从根目录运行冒烟检查
+
+```bash
+bash scripts/smoke-test.sh
+```
+
+三个 MySQL 使用 `mysql:8.4.11`，数据库端口只在容器网络中开放。所有服务加入 `campus-network`，通过 `NACOS_SERVER_ADDR=nacos:8848` 连接注册中心；应用分别连接 `user-db`、`dish-db`、`order-db`。订单服务每次通过 `DiscoveryClient` 获取 `user-service`、`dish-service` 的当前已知实例，再使用实例 URI 和原业务路径发送 HTTP 请求；这里只选择第一个实例，不实现负载均衡或自动重试。业务请求不经过 Nacos 转发。
+
+MySQL 健康检查使用本实例业务账号执行 `SELECT 1`；应用健康接口检查自身数据库，订单启动时还等待用户、菜品服务健康。初始化 SQL 仅在空卷首次启动时执行。`nacos-data` 保存 Nacos 数据，`user-data`、`dish-data`、`order-data` 分别保存数据库文件。
+
+冒烟脚本先检查 `http://localhost:18080/` 控制台和三个服务的健康接口，再实际创建一笔订单并扣减两份库存，默认使用 `student-1`、商家 10、菜品 1。它检查状态码、错误码、订单明细合并、金额、库存变化及失败后的数据，任一 HTTP 检查或断言失败均非零退出。重复执行会继续消耗库存，运行前确保测试菜品至少剩余两份。可通过 `NACOS_CONSOLE_URL`、`USER_BASE_URL`、`DISH_BASE_URL`、`ORDER_BASE_URL`、`SMOKE_USER_ID`、`SMOKE_MERCHANT_ID`、`SMOKE_DISH_ID` 覆盖默认值。
+
+控制台可打开、实例已注册与业务调用成功是不同检查。停服恢复和业务数据验证另见下文及 [第 07 周记录](docs/homework/week-07/index.md)。启动或检查失败时查看：
+
+```bash
+sudo docker compose ps
+sudo docker compose logs --tail=100 nacos user-service dish-service order-service
+```
+
+### 5. 后续启动与停止
+
+完成首次初始化后，后续启动可直接执行：
+
+```bash
 sudo docker compose up -d --build --wait
 sudo docker compose ps
 bash scripts/smoke-test.sh
 ```
 
-三个 MySQL 使用 `mysql:8.4.11`，数据库端口只在容器网络中开放。所有服务加入 `campus-network`；订单通过 `user-service:8081`、`dish-service:8082` 调用依赖，应用分别连接 `user-db`、`dish-db`、`order-db`。
-
-MySQL 健康检查使用本实例业务账号执行 `SELECT 1`；应用健康接口检查自身数据库，订单启动时还等待用户、菜品服务健康。初始化 SQL 仅在空卷首次启动时执行。三个命名卷 `user-data`、`dish-data`、`order-data` 分别保存数据库文件。
-
-冒烟脚本会实际创建一笔订单并扣减两份库存，默认使用 `student-1`、商家 10、菜品 1。它检查状态码、错误码、订单明细合并、金额、库存变化及失败后的数据，任一断言失败均非零退出。可通过 `USER_BASE_URL`、`DISH_BASE_URL`、`ORDER_BASE_URL`、`SMOKE_USER_ID`、`SMOKE_MERCHANT_ID`、`SMOKE_DISH_ID` 覆盖默认值。
+停止系统使用 `sudo docker compose down`，保留 Nacos 数据卷时无需重复初始化管理员。修改 `.env` 不会自动修改已有卷中的 MySQL 密码或 Nacos 管理员密码，需要同步修改实际账号密码。`down -v` 会删除包括 Nacos 在内的实验数据卷。
 
 ## 业务 API
 
@@ -139,24 +211,17 @@ MySQL 健康检查使用本实例业务账号执行 `SELECT 1`；应用健康接
 
 订单通过 `RestTemplate` 顺序查询用户、预校验菜品、扣减库存，再提交本地订单事务。总额使用扣减响应的价格快照计算；订单查询只读取本地订单及明细。下单成功返回 201 和 `PENDING_PAYMENT`，用户、菜品不存在返回 404，禁用或业务冲突返回 409，依赖连接失败返回 503，超时返回 504，异常依赖响应返回 502。错误响应使用带稳定 `code` 的 `ProblemDetail`，生成操作号后附带 `orderNo`。
 
-| 环境变量 | 默认值 |
-|---|---|
-| `USER_SERVICE_URL` | `http://user-service:8081` |
-| `DISH_SERVICE_URL` | `http://dish-service:8082` |
-| `HTTP_CONNECT_TIMEOUT` | `2s` |
-| `HTTP_READ_TIMEOUT` | `5s` |
-
-本机直接启动订单应用时，将两个服务地址分别设为 `http://localhost:8081` 和 `http://localhost:8082`，并为各应用提供自己的 `DB_URL`、`DB_USERNAME`、`DB_PASSWORD`。
-
 ## 独立工程测试
 
-安装 JDK 25 和 Maven 3.9+ 后，在仓库根目录执行：
+安装 JDK 25 和 Maven 3.9+ 后，在仓库根目录分别进入各工程执行测试：
 
 ```bash
-mvn -f services/user-service/pom.xml test
-mvn -f services/dish-service/pom.xml test
-mvn -f services/order-service/pom.xml test
+(cd services/user-service && mvn test)
+(cd services/dish-service && mvn test)
+(cd services/order-service && mvn test)
 ```
+
+每条命令在子 Shell 中切换目录，执行后仍位于仓库根目录。测试通过 `test` Profile 使用 H2 并关闭 Nacos 服务发现和自动注册；订单测试模拟 `DiscoveryClient` 和远程 HTTP 响应，不依赖真实 Nacos 或 MySQL。
 
 ## 故障演示与恢复
 
@@ -171,7 +236,7 @@ curl -i -X POST http://localhost:8083/api/orders \
 sudo docker compose up -d --wait user-service
 ```
 
-将停止和恢复对象改成 `dish-service` 可复现菜品依赖故障。服务恢复后可以重新运行冒烟脚本。运行期失败由 HTTP 客户端处理，启动依赖不会替代业务校验。
+停止后在 Nacos 控制台观察实例列表随后变化；SDK 可能短暂保留旧地址，无实例或旧地址连接失败应返回 503。恢复后等待实例重新注册且业务接口可访问，再提交正常请求。将停止和恢复对象改成 `dish-service` 可复现菜品依赖故障。服务恢复后可以重新运行冒烟脚本。运行期失败由 HTTP 客户端处理，启动依赖不会替代业务校验。
 
 库存扣减明确成功而本地订单保存失败时，会出现“远端成功、本地失败”的窗口。订单服务先核对本地提交结果，确认无订单后以同一 `orderNo` 释放库存；释放成功记录 `FAILED`，释放失败或提交结果无法确认记录 `RECOVERY_REQUIRED` 并返回 503。相同操作号不重复扣减或回补；释放先到会保存 `RELEASED` 终态以拒绝迟到扣减。
 
@@ -194,7 +259,7 @@ diff -u "$VERIFY_DIR/order-before.json" "$VERIFY_DIR/order-after.json"
 diff -u "$VERIFY_DIR/dishes-before.json" "$VERIFY_DIR/dishes-after.json"
 ```
 
-前后查询均成功且两个 `diff` 无输出时，说明该订单和库存保持一致。普通 `down` 保留三个数据库命名卷；`down -v` 会删除数据卷。停止微服务使用 `sudo docker compose down`。
+前后查询均成功且两个 `diff` 无输出时，说明该订单和库存保持一致。普通 `down` 保留三个数据库及 Nacos 命名卷；`down -v` 会删除数据卷。停止微服务使用 `sudo docker compose down`。
 
 ## 保留的单体版本
 

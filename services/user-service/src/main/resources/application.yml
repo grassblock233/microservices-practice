@@ -3,6 +3,14 @@ server:
 spring:
   application:
     name: user-service
+  cloud:
+    nacos:
+      discovery:
+        server-addr: ${NACOS_SERVER_ADDR:localhost:8848}
+        username: ${NACOS_USERNAME:nacos}
+        password: ${NACOS_PASSWORD:}
+        namespace: ${NACOS_NAMESPACE:}
+        group: CAMPUS_TAKEAWAY_GROUP
   datasource:
     url: ${DB_URL:jdbc:mysql://user-db:3306/campus_user}
     username: ${DB_USERNAME:user_app}

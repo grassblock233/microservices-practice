@@ -29,8 +29,7 @@ public class OrderDtos {
     public record Response(String orderNo, BigDecimal totalAmount, OrderStatus status) {
     }
 
-    public record SummaryResponse(String orderNo, BigDecimal totalAmount, OrderStatus status,
-                                  LocalDateTime createdAt) {
+    public record SummaryResponse(String orderNo, BigDecimal totalAmount, OrderStatus status, LocalDateTime createdAt) {
     }
 
     public record ItemResponse(Long dishId, String dishName, BigDecimal unitPrice, Integer quantity,
@@ -38,7 +37,7 @@ public class OrderDtos {
     }
 
     public record DetailResponse(String orderNo, String userId, Long merchantId, BigDecimal totalAmount,
-                                 OrderStatus status, String deliveryAddress, String remark,
-                                 LocalDateTime createdAt, List<ItemResponse> items) {
+                                 OrderStatus status, String deliveryAddress, String remark, LocalDateTime createdAt,
+                                 List<ItemResponse> items) {
     }
 }
