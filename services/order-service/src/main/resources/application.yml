@@ -4,6 +4,18 @@ spring:
   application:
     name: order-service
   cloud:
+    openfeign:
+      client:
+        config:
+          default:
+            connectTimeout: ${HTTP_CONNECT_TIMEOUT:3000}
+            readTimeout: ${HTTP_READ_TIMEOUT:5000}
+            followRedirects: false
+    loadbalancer:
+      retry:
+        enabled: false
+      cache:
+        enabled: true
     nacos:
       discovery:
         server-addr: ${NACOS_SERVER_ADDR:localhost:8848}
@@ -33,6 +45,3 @@ management:
   endpoint:
     health:
       show-details: never
-clients:
-  connect-timeout: ${HTTP_CONNECT_TIMEOUT:2s}
-  read-timeout: ${HTTP_READ_TIMEOUT:5s}

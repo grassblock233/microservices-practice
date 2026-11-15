@@ -1,5 +1,9 @@
 spring:
   cloud:
+    loadbalancer:
+      cache:
+        # 测试会动态切换 DiscoveryClient 实例，避免缓存跨用例保留旧地址。
+        enabled: false
     discovery:
       enabled: false
     service-registry:

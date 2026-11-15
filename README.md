@@ -95,6 +95,7 @@ flowchart TD
 monolith/                 原单体工程
 services/                 用户、菜品、订单三个独立 Spring Boot 工程
 compose.yaml              微服务编排：Nacos + 三个服务 + 三个 MySQL
+compose.scale.yaml        多实例配置：取消菜品服务固定宿主机端口
 compose.monolith.yaml     单体应用 + 原 MySQL
 scripts/                  数据库初始化 SQL 与冒烟测试脚本
 docs/                     设计文档与各周实践记录
@@ -183,8 +184,6 @@ bash scripts/smoke-test.sh
 | 订单 :8083 | `GET /api/orders?userId=student-1` | 本地订单列表 |
 | 订单 :8083 | `GET /api/orders/{orderNo}` | 本地历史快照详情 |
 
-订单通过 `RestTemplate` 顺序查询用户、预校验菜品、扣减库存，再提交本地订单事务。总额使用扣减响应的价格快照计算；订单查询只读取本地订单及明细。下单成功返回 201 和 `PENDING_PAYMENT`，用户、菜品不存在返回 404，禁用或业务冲突返回 409，依赖连接失败返回 503，超时返回 504，异常依赖响应返回 502。错误响应使用带稳定 `code` 的 `ProblemDetail`，生成操作号后附带 `orderNo`
-
 ## 运行测试
 
 安装 JDK 25 和 Maven 3.9+ 后，在仓库根目录分别进入各工程执行测试：
@@ -195,7 +194,54 @@ bash scripts/smoke-test.sh
 (cd services/order-service && mvn test)
 ```
 
-测试使用 `test` Profile 使用 H2，并关闭 Nacos 服务发现和自动注册，订单测试模拟 `DiscoveryClient` 和远程 HTTP 响应，不依赖真实 Nacos 或 MySQL
+测试使用 `test` Profile 使用 H2，并关闭 Nacos 服务发现和自动注册。订单测试模拟 `DiscoveryClient`；保留的事务测试适配 Feign 传输，`FeignClientTests` 使用随机本机端口 HTTP 服务验证真实 Feign 调用、双实例轮询与写入后响应超时，不依赖真实 Nacos 或 MySQL。新增测试与端到端脚本的实际执行由使用者完成，静态检查不代表测试通过。
+
+## 观察负载均衡
+
+> [!NOTE]
+> 以下命令需在仓库根目录、同一个 Bash 终端执行
+
+### 1. 启动两个菜品实例
+
+```bash
+sudo docker compose -f compose.yaml -f compose.scale.yaml config --quiet
+sudo docker compose -f compose.yaml -f compose.scale.yaml up -d --build --scale dish-service=2 --wait
+sudo docker compose -f compose.yaml -f compose.scale.yaml ps
+```
+
+在 Nacos 控制台的相同 namespace、`CAMPUS_TAKEAWAY_GROUP` 中，确认 `dish-service` 有两个健康实例。下面的业务请求和实例日志用于判断负载均衡是否生效。
+
+### 2. 发出请求
+
+可使用有效用户 `student-1` 和不存在的菜品编号测试负载均衡
+
+```bash
+curl -fsS http://localhost:8081/api/users/student-1
+sudo docker compose -f compose.yaml -f compose.scale.yaml exec -T --index 1 dish-service \
+  curl -fsS 'http://localhost:8082/api/dishes?merchantId=10'
+LB_DISH_ID=$(python3 -c 'import time; print(time.time_ns())')
+printf '本次观察菜品编号：%s\n' "$LB_DISH_ID"
+for i in {1..10}; do
+  curl -sS --max-time 15 -w '\nHTTP %{http_code}\n' \
+    http://localhost:8083/api/orders -H 'Content-Type: application/json' \
+    -d "{\"userId\":\"student-1\",\"merchantId\":10,\"items\":[{\"dishId\":$LB_DISH_ID,\"quantity\":1}],\"deliveryAddress\":\"负载均衡验证\"}"
+done
+sudo docker compose -f compose.yaml -f compose.scale.yaml logs --no-color dish-service \
+  | grep 'event=stock_validation_requested' | grep -F "dishIds=[$LB_DISH_ID]"
+```
+
+预期十次请求均返回 404，JSON 的 `code` 为 `DISH_NOT_FOUND`；匹配日志的 Compose 前缀应包含两个不同菜品容器，证明同一调用方经 Feign 访问了两个实例。不要求日志严格交替或次数绝对相等。若只命中一个实例，检查两个实例是否健康、namespace/group 是否一致，等待发现列表更新后重试；不要直接请求两个容器冒充调用方负载均衡。
+
+覆盖配置取消宿主机 8082 映射，菜品查询使用上面的容器内命令；原冒烟脚本默认访问宿主机 8082，多实例验收改用：
+
+```bash
+# 当前用户需要 Docker 权限；否则使用 sudo bash scripts/e2e-test.sh。
+bash scripts/e2e-test.sh
+# 完成观察后，恢复单实例和宿主机 8082 映射。
+sudo docker compose -f compose.yaml up -d --scale dish-service=1 --wait
+```
+
+E2E 脚本会创建一个真实订单、消耗两份库存并短暂暂停依赖，请留足库存，避免并发修改测试数据。
 
 ## 故障演示与恢复
 
@@ -251,7 +297,7 @@ sudo docker compose -f compose.monolith.yaml down
 
 ## 当前项目进度
 
-当前已完成第 07 周（Nacos 服务注册与发现），累计进度如下：
+当前已在第 07 周 Nacos 服务注册与发现基础上，编写第 08 周 OpenFeign 与负载均衡实现；第 08 周部署与测试待使用者运行。累计进度如下：
 
 - 完成项目选题、业务背景、目标用户、功能模块和订单状态设计
 - 完成 [项目提案](docs/project-proposal.md)：项目名称、目标用户、优先业务场景与订单、菜品两个核心模型
@@ -259,6 +305,7 @@ sudo docker compose -f compose.monolith.yaml down
 - 使用 MySQL 与 Spring Data JPA 持久化订单及明细，并提供容器化配置
 - 拆分用户、菜品、订单三个独立服务与数据库，实现 RestTemplate 调用、库存幂等、失败补偿及恢复记录
 - 接入 Nacos 3.2.4 服务注册与发现：三个服务注册到 `CAMPUS_TAKEAWAY_GROUP`，订单服务按实例 URI 动态调用用户、菜品服务，已移除固定地址配置
+- 第 08 周改用 OpenFeign + LoadBalancer，保留超时、错误映射和补偿机制，新增双实例 Compose、Feign 测试及端到端脚本
 - 完成微服务 Compose 部署与健康、成功下单、依赖资源不存在及用户禁用的冒烟验收；三个工程共 43 个测试通过
 - 规划后续认证、消息、事务恢复和监控方向
 
@@ -266,7 +313,7 @@ sudo docker compose -f compose.monolith.yaml down
 
 [功能模块划分](#功能模块划分) 为完整规划。目前已实现用户查询、菜品查询、跨服务下单和订单查询等基础能力，登录认证、商家管理、支付及配送等模块仍待实现
 
-微服务治理方面，当前只使用第一个发现到的实例，尚未实现负载均衡、自动重试、熔断、配置中心和跨服务事务；一致性依靠补偿和人工核对。以下能力也不在本课程当前实现范围内：
+微服务治理方面，当前使用 Spring Cloud LoadBalancer 选择发现到的实例；为避免写操作超时后重复执行，显式关闭自动重试。熔断未启用，配置中心和跨服务事务尚未实现；一致性依靠补偿和人工核对。以下能力也不在本课程当前实现范围内：
 
 - 真实支付、真实退款等支付系统
 - 真实地图导航、实时轨迹和路径规划

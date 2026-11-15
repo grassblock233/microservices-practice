@@ -1,5 +1,6 @@
 package com.zjgsu.lht.service;
 
+import com.zjgsu.lht.dto.StockDtos;
 import com.zjgsu.lht.dto.StockDtos.Operation;
 import com.zjgsu.lht.dto.StockDtos.Request;
 import com.zjgsu.lht.dto.StockDtos.Snapshot;
@@ -49,7 +50,11 @@ public class StockService {
 
     public List<Snapshot> validate(Request raw) {
         var request = raw.normalized();
-        return tx.execute(s -> checked(request, false).stream().map(d -> snapshot(d, request)).toList());
+        log.info("event=stock_validation_requested merchantId={} dishIds={}", request.merchantId(),
+                request.items().stream().map(StockDtos.Item::dishId).toList());
+        var result = tx.execute(s -> checked(request, false).stream().map(d -> snapshot(d, request)).toList());
+        log.info("event=stock_validated merchantId={} itemCount={}", request.merchantId(), request.items().size());
+        return result;
     }
 
     public record Deduction(Operation operation, boolean created) {

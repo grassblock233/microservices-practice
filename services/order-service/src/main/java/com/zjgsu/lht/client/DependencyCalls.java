@@ -1,10 +1,10 @@
 package com.zjgsu.lht.client;
 
 import com.zjgsu.lht.exception.ApiException;
+import feign.FeignException;
+import feign.RetryableException;
+import feign.codec.DecodeException;
 import org.springframework.stereotype.Component;
-import org.springframework.web.client.ResourceAccessException;
-import org.springframework.web.client.RestClientException;
-import org.springframework.web.client.RestClientResponseException;
 import tools.jackson.databind.ObjectMapper;
 
 import java.net.SocketTimeoutException;
@@ -20,25 +20,30 @@ public class DependencyCalls {
         this.json = json;
     }
 
-    public <T> T call(Supplier<T> action, Map<String, Integer> allowed) {
+    public <T> T call(String service, Supplier<T> action, Map<String, Integer> allowed) {
         try {
             return action.get();
-        } catch (RestClientResponseException e) {
-            String code = "";
-            try {
-                code = json.readTree(e.getResponseBodyAsString()).path("code").asText();
-            } catch (RuntimeException ignored) { /* Never propagate an untrusted response body. */ }
-            if (allowed.getOrDefault(code, 0) == e.getStatusCode().value())
-                throw new ApiException(e.getStatusCode().value(), code, "依赖服务拒绝业务请求");
-            throw new ApiException(502, "DEPENDENCY_BAD_RESPONSE", "依赖服务返回异常响应", null, e);
-        } catch (ResourceAccessException e) {
+        } catch (RetryableException e) {
             boolean timeout = false;
             for (Throwable c = e; c != null; c = c.getCause())
                 if (c instanceof SocketTimeoutException || c instanceof HttpTimeoutException) timeout = true;
             throw new ApiException(timeout ? 504 : 503, timeout ? "DEPENDENCY_TIMEOUT" : "DEPENDENCY_UNAVAILABLE",
-                    timeout ? "依赖服务请求超时" : "依赖服务无法连接", null, e);
-        } catch (RestClientException e) {
-            throw new ApiException(502, "DEPENDENCY_BAD_RESPONSE", "依赖服务响应格式不正确", null, e);
+                    service + (timeout ? " 请求超时；写操作结果可能未知，请勿盲目重试" : " 暂无可用连接"), null, e);
+        } catch (DecodeException e) {
+            throw new ApiException(502, "DEPENDENCY_BAD_RESPONSE", service + " 响应格式不正确", null, e);
+        } catch (FeignException e) {
+            String code = "";
+            try {
+                code = json.readTree(e.contentUTF8()).path("code").asText();
+            } catch (RuntimeException ignored) { /* Never propagate an untrusted response body. */ }
+            if (allowed.getOrDefault(code, 0) == e.status())
+                throw new ApiException(e.status(), code, service + " 拒绝业务请求（" + code + "）", null, e);
+            if (e.status() >= 500 || e.status() < 0)
+                throw new ApiException(503, "DEPENDENCY_UNAVAILABLE", service + " 暂不可用；写操作请按订单号核对", null, e);
+            throw new ApiException(502, "DEPENDENCY_BAD_RESPONSE", service + " 返回异常响应", null, e);
+        } catch (RuntimeException e) {
+            // Discovery/instance selection can fail before an HTTP response exists.
+            throw new ApiException(503, "DEPENDENCY_UNAVAILABLE", service + " 服务发现或实例选择失败", null, e);
         }
     }
 

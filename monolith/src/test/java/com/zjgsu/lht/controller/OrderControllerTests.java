@@ -229,14 +229,12 @@ class OrderControllerTests {
     }
 
     /**
-     * 提供资源不存在、商家冲突、下架、库存不足和数量溢出的异常及预期状态码。
+     * 每种异常类型保留一个代表用例；具体业务冲突由 Service 测试分别覆盖。
      */
     static Stream<Arguments> businessErrors() {
         return Stream.of(
                 Arguments.of(new ResourceNotFoundException("菜品不存在：7"), 404),
                 Arguments.of(new OrderConflictException("菜品不属于请求商家：7"), 409),
-                Arguments.of(new OrderConflictException("菜品已下架：7"), 409),
-                Arguments.of(new OrderConflictException("菜品库存不足：7"), 409),
                 Arguments.of(new InvalidRequestException("菜品购买数量超出允许范围：7"), 400));
     }
 

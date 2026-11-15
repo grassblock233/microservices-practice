@@ -12,6 +12,8 @@ import com.zjgsu.lht.repository.StockOperationRepository;
 import com.zjgsu.lht.service.StockService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -259,17 +261,151 @@ class StockServiceTests {
     }
 
     @Test
-    void rejectsMalformedAndInvalidBodies() throws Exception {
+    void validatesSnapshotsOverHttpWithoutReservingStock() throws Exception {
+        mvc.perform(post("/internal/dishes/validate").contentType("application/json").content(httpBody()))
+                .andExpect(status().isOk())
+                .andExpect(content().contentTypeCompatibleWith("application/json"))
+                .andExpect(jsonPath("$.length()").value(1))
+                .andExpect(jsonPath("$[0].dishId").value(first))
+                .andExpect(jsonPath("$[0].dishName").value("鸡腿饭"))
+                .andExpect(jsonPath("$[0].unitPrice").value(12.50))
+                .andExpect(jsonPath("$[0].quantity").value(3));
+        assertEquals(10, quantity(first));
+        assertEquals(0, operations.count());
+        assertEquals(0, items.count());
+    }
+
+    @Test
+    void deductHttpReturns201Then200AndPreservesOriginalSnapshot() throws Exception {
+        var op = id();
+        var path = "/internal/stock-operations/" + op;
+        mvc.perform(post(path + "/deduct").contentType("application/json").content(httpBody()))
+                .andExpect(status().isCreated())
+                .andExpect(content().contentTypeCompatibleWith("application/json"))
+                .andExpect(jsonPath("$.orderNo").value(op))
+                .andExpect(jsonPath("$.status").value("DEDUCTED"))
+                .andExpect(jsonPath("$.items.length()").value(1))
+                .andExpect(jsonPath("$.items[0].dishId").value(first))
+                .andExpect(jsonPath("$.items[0].dishName").value("鸡腿饭"))
+                .andExpect(jsonPath("$.items[0].unitPrice").value(12.50))
+                .andExpect(jsonPath("$.items[0].quantity").value(3));
+        var dish = dishes.findById(first).orElseThrow();
+        dish.setName("已改名");
+        dish.setPrice(new BigDecimal("99.00"));
+        dishes.saveAndFlush(dish);
+        var repeated = mvc.perform(post(path + "/deduct").contentType("application/json").content(httpBody()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.orderNo").value(op))
+                .andExpect(jsonPath("$.status").value("DEDUCTED"))
+                .andExpect(jsonPath("$.items[0].dishName").value("鸡腿饭"))
+                .andExpect(jsonPath("$.items[0].unitPrice").value(12.50))
+                .andReturn().getResponse().getContentAsString();
+        mvc.perform(get(path)).andExpect(status().isOk()).andExpect(content().json(repeated));
+        assertEquals(7, quantity(first));
+        assertEquals(1, operations.count());
+        assertEquals(1, items.count());
+    }
+
+    @Test
+    void releaseHttpRestoresStockOnceAndRejectsLateDeduction() throws Exception {
+        var op = id();
+        stock.deduct(op, request(first, 3));
+        var path = "/internal/stock-operations/" + op;
+        for (int repeat = 0; repeat < 2; repeat++) {
+            mvc.perform(put(path + "/release"))
+                    .andExpect(status().isOk())
+                    .andExpect(content().contentTypeCompatibleWith("application/json"))
+                    .andExpect(jsonPath("$.orderNo").value(op))
+                    .andExpect(jsonPath("$.status").value("RELEASED"))
+                    .andExpect(jsonPath("$.items[0].dishId").value(first))
+                    .andExpect(jsonPath("$.items[0].quantity").value(3));
+            assertEquals(10, quantity(first));
+        }
+        mvc.perform(get(path)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("RELEASED"));
+        mvc.perform(post(path + "/deduct").contentType("application/json").content(httpBody()))
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.code").value("OPERATION_RELEASED"));
+        assertEquals(10, quantity(first));
+    }
+
+    @Test
+    void releaseHttpBeforeDeductionCreatesQueryableTombstone() throws Exception {
+        var op = id();
+        var path = "/internal/stock-operations/" + op;
+        mvc.perform(put(path + "/release")).andExpect(status().isOk())
+                .andExpect(jsonPath("$.orderNo").value(op))
+                .andExpect(jsonPath("$.status").value("RELEASED"))
+                .andExpect(jsonPath("$.items").isEmpty());
+        mvc.perform(get(path)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("RELEASED"));
+        mvc.perform(post(path + "/deduct").contentType("application/json").content(httpBody()))
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.code").value("OPERATION_RELEASED"));
+        assertEquals(10, quantity(first));
+        assertEquals(1, operations.count());
+        assertEquals(0, items.count());
+    }
+
+    @Test
+    void missingOperationHttpReturnsExplicit404() throws Exception {
+        mvc.perform(get("/internal/stock-operations/" + id()))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.status").value(404))
+                .andExpect(jsonPath("$.code").value("STOCK_OPERATION_NOT_FOUND"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"GET", "POST", "PUT"})
+    void stockHttpRejectsInvalidOperationNumber(String method) throws Exception {
+        var path = "/internal/stock-operations/not-a-uuid";
+        var httpRequest = switch (method) {
+            case "POST" -> post(path + "/deduct").contentType("application/json").content(httpBody());
+            case "PUT" -> put(path + "/release");
+            default -> get(path);
+        };
+        mvc.perform(httpRequest).andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_REQUEST"));
+        assertEquals(0, operations.count());
+        assertEquals(10, quantity(first));
+    }
+
+    @Test
+    void dishListHttpFiltersMerchantAndStatusAndKeepsSoldOutDishesInIdOrder() throws Exception {
+        seed(20, "其他商家", 10, DishStatus.ON_SALE);
+        seed(10, "下架菜品", 10, DishStatus.OFF_SALE);
+        var soldOut = seed(10, "售罄菜品", 0, DishStatus.ON_SALE);
+        mvc.perform(get("/api/dishes").param("merchantId", "10"))
+                .andExpect(status().isOk())
+                .andExpect(content().contentTypeCompatibleWith("application/json"))
+                .andExpect(jsonPath("$.length()").value(3))
+                .andExpect(jsonPath("$[0].id").value(first))
+                .andExpect(jsonPath("$[0].merchantId").value(10))
+                .andExpect(jsonPath("$[0].name").value("鸡腿饭"))
+                .andExpect(jsonPath("$[0].price").value(12.50))
+                .andExpect(jsonPath("$[0].status").value("ON_SALE"))
+                .andExpect(jsonPath("$[1].id").value(second))
+                .andExpect(jsonPath("$[2].id").value(soldOut))
+                .andExpect(jsonPath("$[2].stock").value(0));
+        mvc.perform(get("/api/dishes").param("merchantId", "999"))
+                .andExpect(status().isOk()).andExpect(content().json("[]"));
+    }
+
+    private String httpBody() {
+        return "{\"merchantId\":10,\"items\":[{\"dishId\":" + first + ",\"quantity\":3}]}";
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/internal/dishes/validate", "/internal/stock-operations/123e4567-e89b-12d3-a456-426614174000/deduct"})
+    void rejectsMalformedAndInvalidBodies(String path) throws Exception {
         for (String body : new String[]{"{", "{}", "{\"merchantId\":10,\"items\":[]}",
                 "{\"merchantId\":10,\"items\":[{\"dishId\":1,\"quantity\":1.2}]}"})
-            mvc.perform(post("/internal/dishes/validate").contentType("application/json").content(body))
+            mvc.perform(post(path).contentType("application/json").content(body))
                     .andExpect(status().isBadRequest()).andExpect(jsonPath("$.code").value("INVALID_REQUEST"));
         assertEquals(0, operations.count());
         assertEquals(10, quantity(first));
     }
 
     @Test
-    void healthChecksOwnDatabase() throws Exception {
+    void healthEndpointReportsUpWhenDatabaseIsAvailable() throws Exception {
         mvc.perform(get("/actuator/health")).andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("UP"));
     }

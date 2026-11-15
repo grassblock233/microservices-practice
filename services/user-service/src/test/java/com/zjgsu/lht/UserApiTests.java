@@ -49,7 +49,7 @@ class UserApiTests {
     }
 
     @Test
-    void healthChecksOwnDatabase() throws Exception {
+    void healthEndpointReportsUpWhenDatabaseIsAvailable() throws Exception {
         mvc.perform(get("/actuator/health")).andExpect(status().isOk()).andExpect(jsonPath("$.status").value("UP"));
     }
 }

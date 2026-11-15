@@ -1,0 +1,3 @@
+services:
+  dish-service:
+    ports: !reset []

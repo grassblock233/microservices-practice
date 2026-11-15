@@ -32,10 +32,13 @@ import static org.springframework.test.web.client.response.MockRestResponseCreat
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers;
+import com.zjgsu.lht.support.FeignRestTestConfiguration;
+import org.springframework.context.annotation.Import;
 
-@SpringBootTest
+@SpringBootTest(properties = {"spring.cloud.discovery.enabled=true", "spring.cloud.discovery.reactive.enabled=false"})
 @AutoConfigureMockMvc
 @ActiveProfiles("test")
+@Import(FeignRestTestConfiguration.class)
 class OrderFlowTests {
     @Autowired OrderService service;
     @Autowired MockMvc mvc;
@@ -116,7 +119,7 @@ class OrderFlowTests {
         assertEquals(0,attempts.count());
     }
     @Test
-    void healthOnlyChecksOwnDatabase() throws Exception {
+    void healthEndpointReportsUpWhenDatabaseIsAvailable() throws Exception {
         mvc.perform(get("/actuator/health"))
             .andExpect(status().isOk())
             .andExpect(MockMvcResultMatchers.jsonPath("$.status").value("UP"));
