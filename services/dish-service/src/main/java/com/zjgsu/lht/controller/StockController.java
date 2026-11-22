@@ -1,17 +1,18 @@
 package com.zjgsu.lht.controller;
 
-import com.zjgsu.lht.dto.StockDtos.Operation;
 import com.zjgsu.lht.dto.StockDtos.Request;
 import com.zjgsu.lht.dto.StockDtos.Snapshot;
 import com.zjgsu.lht.service.StockService;
 import jakarta.validation.Valid;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
 
 @RestController
-@RequestMapping("/internal")
+@RequestMapping("/internal/stock")
 public class StockController {
     private final StockService stock;
 
@@ -19,24 +20,8 @@ public class StockController {
         this.stock = stock;
     }
 
-    @PostMapping("/dishes/validate")
-    public List<Snapshot> validate(@Valid @RequestBody Request r) {
-        return stock.validate(r);
-    }
-
-    @PostMapping("/stock-operations/{orderNo}/deduct")
-    public ResponseEntity<Operation> deduct(@PathVariable String orderNo, @Valid @RequestBody Request r) {
-        var d = stock.deduct(orderNo, r);
-        return ResponseEntity.status(d.created() ? 201 : 200).body(d.operation());
-    }
-
-    @PutMapping("/stock-operations/{orderNo}/release")
-    public Operation release(@PathVariable String orderNo) {
-        return stock.release(orderNo);
-    }
-
-    @GetMapping("/stock-operations/{orderNo}")
-    public Operation get(@PathVariable String orderNo) {
-        return stock.get(orderNo);
+    @PostMapping("/deduct")
+    public List<Snapshot> deduct(@Valid @RequestBody Request r) {
+        return stock.deduct(r);
     }
 }

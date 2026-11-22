@@ -1,6 +1,5 @@
 package com.zjgsu.lht.client;
 
-import com.zjgsu.lht.dto.StockDtos.Operation;
 import com.zjgsu.lht.dto.StockDtos.Request;
 import com.zjgsu.lht.dto.StockDtos.Snapshot;
 import org.springframework.stereotype.Component;
@@ -12,7 +11,7 @@ import java.util.Map;
 @Component
 public class DishClient {
     private static final Map<String, Integer> RULES = Map.of("DISH_NOT_FOUND", 404, "DISH_OFF_SALE", 409,
-            "MERCHANT_MISMATCH", 409, "INSUFFICIENT_STOCK", 409, "OPERATION_CONFLICT", 409, "OPERATION_RELEASED", 409);
+            "MERCHANT_MISMATCH", 409, "INSUFFICIENT_STOCK", 409);
     private final DishFeignClient remote;
     private final DependencyCalls calls;
 
@@ -21,29 +20,11 @@ public class DishClient {
         this.calls = calls;
     }
 
-    public void validate(Request request) {
-        var response = calls.call("dish-service", () -> remote.validate(request), RULES);
+    public List<Snapshot> deduct(Request request) {
+        var response = calls.call("dish-service", () -> remote.deduct(request), RULES);
         if (response.getStatusCode().value() != 200) throw DependencyCalls.badResponse();
         check(response.getBody(), request);
-    }
-
-    public Operation deduct(String orderNo, Request request) {
-        var response = calls.call("dish-service", () -> remote.deduct(orderNo, request), RULES);
-        if (response.getStatusCode().value() != 200 && response.getStatusCode().value() != 201)
-            throw DependencyCalls.badResponse();
-        var op = response.getBody();
-        if (op == null || !orderNo.equals(op.orderNo()) || !"DEDUCTED".equals(op.status()))
-            throw DependencyCalls.badResponse();
-        check(op.items(), request);
-        return op;
-    }
-
-    public void release(String orderNo) {
-        var response = calls.call("dish-service", () -> remote.release(orderNo), Map.of());
-        if (response.getStatusCode().value() != 200) throw DependencyCalls.badResponse();
-        var op = response.getBody();
-        if (op == null || !orderNo.equals(op.orderNo()) || !"RELEASED".equals(op.status()))
-            throw DependencyCalls.badResponse();
+        return response.getBody();
     }
 
     private void check(List<Snapshot> list, Request request) {

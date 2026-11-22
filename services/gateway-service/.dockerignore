@@ -1,0 +1,7 @@
+**
+!compose.yaml
+!services/
+!services/gateway-service/
+!services/gateway-service/pom.xml
+!services/gateway-service/src/
+!services/gateway-service/src/**

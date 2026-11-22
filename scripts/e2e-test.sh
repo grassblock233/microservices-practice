@@ -6,8 +6,8 @@ for dependency in docker curl python3; do
   command -v "$dependency" >/dev/null || { echo "缺少命令: $dependency" >&2; exit 1; }
 done
 DC=(docker compose --project-directory "$ROOT_DIR" -f "$ROOT_DIR/compose.yaml" -f "$ROOT_DIR/compose.scale.yaml")
-USER_BASE_URL=${USER_BASE_URL:-http://localhost:8081}
-ORDER_BASE_URL=${ORDER_BASE_URL:-http://localhost:8083}
+source "$ROOT_DIR/scripts/auth-test.sh"
+GATEWAY_URL=${GATEWAY_URL:-http://localhost:8080}
 E2E_USER_ID=${E2E_USER_ID:-student-1}
 E2E_MERCHANT_ID=${E2E_MERCHANT_ID:-10}
 E2E_DISH_ID=${E2E_DISH_ID:-1}
@@ -36,7 +36,9 @@ trap 'exit 143' TERM
 request() {
   local expected=$1 method=$2 url=$3 destination=$4 actual
   shift 4
-  actual=$(curl --silent --show-error --connect-timeout 3 --max-time 30 \
+  local auth=()
+  if [[ "$url" == "$GATEWAY_URL/api/"* ]]; then auth=(-H "Authorization: Bearer $student_token"); fi
+  actual=$(curl --silent --show-error --connect-timeout 3 --max-time 30 "${auth[@]}" \
     --request "$method" --output "$destination" --write-out '%{http_code}' "$url" "$@")
   echo "$method $url -> $actual (expected $expected)"
   if [[ "$actual" != "$expected" ]]; then cat "$destination" >&2; exit 1; fi
@@ -44,12 +46,6 @@ request() {
 import json, sys
 json.load(open(sys.argv[1]))
 PY
-}
-
-# 多实例模式没有固定宿主机端口；从第一个容器读取同一菜品数据库的数据。
-dish_get() {
-  "${DC[@]}" exec -T --index 1 dish-service curl -fsS --connect-timeout 3 --max-time 10 \
-    "http://localhost:8082$1" > "$2"
 }
 
 wait_dependency() {
@@ -86,10 +82,12 @@ for service in user-service dish-service; do
 done
 wait_dependency user-service 8081
 wait_dependency dish-service 8082
-request 200 GET "$ORDER_BASE_URL/actuator/health" "$work_dir/health.json"
-request 200 GET "$USER_BASE_URL/api/users/$E2E_USER_ID" "$work_dir/user.json"
-dish_get "/api/dishes?merchantId=$E2E_MERCHANT_ID" "$work_dir/before-dishes.json"
-request 200 GET "$ORDER_BASE_URL/api/orders?userId=$E2E_USER_ID" "$work_dir/before-orders.json"
+wait_dependency order-service 8083
+student_token=$(gateway_student_token) || { echo 'FAIL 学生登录失败，无法继续 E2E 测试' >&2; exit 1; }
+request 200 GET "$GATEWAY_URL/actuator/health" "$work_dir/health.json"
+request 200 GET "$GATEWAY_URL/api/users/$E2E_USER_ID" "$work_dir/user.json"
+request 200 GET "$GATEWAY_URL/api/dishes?merchantId=$E2E_MERCHANT_ID" "$work_dir/before-dishes.json"
+request 200 GET "$GATEWAY_URL/api/orders?userId=$E2E_USER_ID" "$work_dir/before-orders.json"
 python3 - "$work_dir" "$E2E_USER_ID" "$E2E_MERCHANT_ID" "$E2E_DISH_ID" <<'PY'
 import json,sys,time
 from pathlib import Path
@@ -104,17 +102,16 @@ missing=body.copy();missing['items']=[dict(dishId=time.time_ns(),quantity=1)]
 (p/'missing-dish.json').write_text(json.dumps(missing))
 PY
 
-request 201 POST "$ORDER_BASE_URL/api/orders" "$work_dir/created.json" \
+request 201 POST "$GATEWAY_URL/api/orders" "$work_dir/created.json" \
   -H 'Content-Type: application/json' --data-binary "@$work_dir/request.json"
 order_no=$(python3 - "$work_dir/created.json" <<'PY'
 import json,sys,uuid
 n=json.load(open(sys.argv[1]))['orderNo'];uuid.UUID(n);print(n)
 PY
 )
-request 200 GET "$ORDER_BASE_URL/api/orders/$order_no" "$work_dir/detail.json"
-request 200 GET "$ORDER_BASE_URL/api/orders?userId=$E2E_USER_ID" "$work_dir/after-orders.json"
-dish_get "/api/dishes?merchantId=$E2E_MERCHANT_ID" "$work_dir/after-dishes.json"
-dish_get "/internal/stock-operations/$order_no" "$work_dir/operation.json"
+request 200 GET "$GATEWAY_URL/api/orders/$order_no" "$work_dir/detail.json"
+request 200 GET "$GATEWAY_URL/api/orders?userId=$E2E_USER_ID" "$work_dir/after-orders.json"
+request 200 GET "$GATEWAY_URL/api/dishes?merchantId=$E2E_MERCHANT_ID" "$work_dir/after-dishes.json"
 python3 - "$work_dir" "$E2E_DISH_ID" <<'PY'
 import json,sys
 from pathlib import Path
@@ -123,15 +120,14 @@ p=Path(sys.argv[1]);dish=int(sys.argv[2])
 def read(f):return json.loads((p/f).read_text(),parse_float=Decimal)
 before=next(x for x in read('before-dishes.json') if x['id']==dish)
 after=next(x for x in read('after-dishes.json') if x['id']==dish)
-created,detail,op=read('created.json'),read('detail.json'),read('operation.json')
+created,detail=read('created.json'),read('detail.json')
 assert created['status']==detail['status']=='PENDING_PAYMENT'
-assert created['orderNo']==detail['orderNo']==op['orderNo']
+assert created['orderNo']==detail['orderNo']
 assert len(detail['items'])==1 and detail['items'][0]['quantity']==2
 snapshot=detail['items'][0]
 assert created['totalAmount']==detail['totalAmount']==snapshot['subtotal']==snapshot['unitPrice']*2
 assert before['stock']-after['stock']==2
-assert op['status']=='DEDUCTED' and op['items'][0]['quantity']==2
-assert op['items'][0]['unitPrice']==snapshot['unitPrice']
+assert snapshot['dishId']==dish and snapshot['dishName']==before['name'] and snapshot['unitPrice']==before['price']
 assert len(read('after-orders.json'))==len(read('before-orders.json'))+1
 print('PASS 下单 JSON、历史价格快照、订单数量和库存扣减')
 PY
@@ -143,16 +139,17 @@ print(json.load(open(sys.argv[1]))['items'][0]['dishId'])
 PY
 )
 for ((i=1; i<=${#dish_ids[@]}*3; i++)); do
-  request 404 POST "$ORDER_BASE_URL/api/orders" "$work_dir/error.json" \
+  request 404 POST "$GATEWAY_URL/api/orders" "$work_dir/error.json" \
     -H 'Content-Type: application/json' --data-binary "@$work_dir/missing-dish.json"
   python3 - "$work_dir/error.json" <<'PY'
-import json,sys
-assert json.load(open(sys.argv[1]))['code']=='DISH_NOT_FOUND'
+import json,sys,uuid
+body=json.load(open(sys.argv[1]));assert body['code']=='DISH_NOT_FOUND',body
+uuid.UUID(body['orderNo'])
 PY
 done
 lb_instances=0
 for id in "${dish_ids[@]}"; do
-  if docker logs "$id" 2>&1 | python3 -c 'import sys; data=sys.stdin.read(); marker="dishIds=["+sys.argv[1]+"]"; sys.exit(0 if any("event=stock_validation_requested" in line and marker in line for line in data.splitlines()) else 1)' "$missing_id"; then
+  if docker logs "$id" 2>&1 | python3 -c 'import sys; data=sys.stdin.read(); marker="dishIds=["+sys.argv[1]+"]"; sys.exit(0 if any("event=stock_deduction_requested" in line and marker in line for line in data.splitlines()) else 1)' "$missing_id"; then
     lb_instances=$((lb_instances+1))
   fi
 done
@@ -160,23 +157,28 @@ done
 echo "PASS LoadBalancer 命中 $lb_instances 个 dish-service 实例"
 
 # 暂停保留连接/注册信息，覆盖读取超时；实例已下线时也可返回 503。
-# 此处故障发生在校验阶段，不会发起库存写操作。
+# 使用不存在的菜品，避免暂停解除后迟到的扣减请求消耗真实库存。
 for service in user-service dish-service; do
   paused_service=$service
   "${DC[@]}" pause "$service"
   actual=$(curl --silent --show-error --connect-timeout 3 --max-time 30 \
     --output "$work_dir/failure.json" --write-out '%{http_code}' \
-    "$ORDER_BASE_URL/api/orders" -H 'Content-Type: application/json' --data-binary "@$work_dir/request.json")
+    "$GATEWAY_URL/api/orders" -H "Authorization: Bearer $student_token" -H 'Content-Type: application/json' --data-binary "@$work_dir/missing-dish.json")
   echo "$service unavailable -> HTTP $actual"
-  python3 - "$work_dir/failure.json" "$actual" <<'PY'
-import json,sys
-body=json.load(open(sys.argv[1]));status=int(sys.argv[2])
+  python3 - "$work_dir/failure.json" "$actual" "$service" <<'PY'
+import json,sys,uuid
+body=json.load(open(sys.argv[1]));status=int(sys.argv[2]);service=sys.argv[3]
 assert status in (503,504), (status,body)
 assert body['status']==status and body['code'] in ('DEPENDENCY_UNAVAILABLE','DEPENDENCY_TIMEOUT'), body
-assert body.get('detail') and not body.get('orderNo'), body
+assert body.get('detail'), body
+if service=='dish-service':
+ uuid.UUID(body['orderNo'])
+ assert '人工核对' in body['detail'], body
+else:
+ assert 'orderNo' not in body, body
 assert 'totalAmount' not in body and body.get('status')!='PENDING_PAYMENT'
 PY
-  request 200 GET "$ORDER_BASE_URL/api/orders?userId=$E2E_USER_ID" "$work_dir/failure-orders.json"
+  request 200 GET "$GATEWAY_URL/api/orders?userId=$E2E_USER_ID" "$work_dir/failure-orders.json"
   python3 - "$work_dir" <<'PY'
 import json,sys
 from pathlib import Path
@@ -187,23 +189,26 @@ PY
   paused_service=''
   port=8081; [[ "$service" == dish-service ]] && port=8082
   wait_dependency "$service" "$port"
-  # 恢复后轮询只读的预校验业务错误，不自动重试下单写请求。
+  # 先用只读接口等待网关发现恢复；不自动重试下单写请求。
+  readiness_url="$GATEWAY_URL/api/users/$E2E_USER_ID"
+  [[ "$service" == dish-service ]] && readiness_url="$GATEWAY_URL/api/dishes?merchantId=$E2E_MERCHANT_ID"
   deadline=$((SECONDS + RECOVERY_WAIT_SECONDS))
   while :; do
-    recovered=$(curl --silent --show-error --connect-timeout 3 --max-time 15 \
-      --output "$work_dir/recovered.json" --write-out '%{http_code}' \
-      "$ORDER_BASE_URL/api/orders" -H 'Content-Type: application/json' --data-binary "@$work_dir/missing-dish.json")
-    if [[ "$recovered" == 404 ]] && python3 - "$work_dir/recovered.json" <<'PY'
-import json,sys
-assert json.load(open(sys.argv[1]))['code']=='DISH_NOT_FOUND'
-PY
-    then break; fi
+    if curl -fsS --connect-timeout 3 --max-time 10 -o /dev/null \
+        -H "Authorization: Bearer $student_token" "$readiness_url"; then break; fi
     if (( SECONDS >= deadline )); then echo '依赖未恢复业务调用' >&2; exit 1; fi
     sleep 2
   done
 done
-dish_get "/api/dishes?merchantId=$E2E_MERCHANT_ID" "$work_dir/final-dishes.json"
-request 200 GET "$ORDER_BASE_URL/api/orders?userId=$E2E_USER_ID" "$work_dir/final-orders.json"
+request 404 POST "$GATEWAY_URL/api/orders" "$work_dir/recovered.json" \
+  -H 'Content-Type: application/json' --data-binary "@$work_dir/missing-dish.json"
+python3 - "$work_dir/recovered.json" <<'PY'
+import json,sys,uuid
+body=json.load(open(sys.argv[1]));assert body['code']=='DISH_NOT_FOUND',body
+uuid.UUID(body['orderNo'])
+PY
+request 200 GET "$GATEWAY_URL/api/dishes?merchantId=$E2E_MERCHANT_ID" "$work_dir/final-dishes.json"
+request 200 GET "$GATEWAY_URL/api/orders?userId=$E2E_USER_ID" "$work_dir/final-orders.json"
 python3 - "$work_dir" <<'PY'
 import json,sys
 from pathlib import Path

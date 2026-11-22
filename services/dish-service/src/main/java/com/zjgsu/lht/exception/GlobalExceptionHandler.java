@@ -16,7 +16,6 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
     public ProblemDetail business(ApiException e) {
         var p = ProblemDetail.forStatusAndDetail(HttpStatusCode.valueOf(e.status), e.getMessage());
         p.setProperty("code", e.code);
-        if (e.orderNo != null) p.setProperty("orderNo", e.orderNo);
         return p;
     }
 

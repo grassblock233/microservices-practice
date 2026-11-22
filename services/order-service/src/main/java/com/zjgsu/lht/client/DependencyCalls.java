@@ -28,7 +28,7 @@ public class DependencyCalls {
             for (Throwable c = e; c != null; c = c.getCause())
                 if (c instanceof SocketTimeoutException || c instanceof HttpTimeoutException) timeout = true;
             throw new ApiException(timeout ? 504 : 503, timeout ? "DEPENDENCY_TIMEOUT" : "DEPENDENCY_UNAVAILABLE",
-                    service + (timeout ? " 请求超时；写操作结果可能未知，请勿盲目重试" : " 暂无可用连接"), null, e);
+                    service + (timeout ? " 请求超时" : " 暂无可用连接"), null, e);
         } catch (DecodeException e) {
             throw new ApiException(502, "DEPENDENCY_BAD_RESPONSE", service + " 响应格式不正确", null, e);
         } catch (FeignException e) {
@@ -39,7 +39,7 @@ public class DependencyCalls {
             if (allowed.getOrDefault(code, 0) == e.status())
                 throw new ApiException(e.status(), code, service + " 拒绝业务请求（" + code + "）", null, e);
             if (e.status() >= 500 || e.status() < 0)
-                throw new ApiException(503, "DEPENDENCY_UNAVAILABLE", service + " 暂不可用；写操作请按订单号核对", null, e);
+                throw new ApiException(503, "DEPENDENCY_UNAVAILABLE", service + " 暂不可用", null, e);
             throw new ApiException(502, "DEPENDENCY_BAD_RESPONSE", service + " 返回异常响应", null, e);
         } catch (RuntimeException e) {
             // Discovery/instance selection can fail before an HTTP response exists.

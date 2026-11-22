@@ -1,12 +1,9 @@
-package com.zjgsu.lht;
+package com.zjgsu.lht.client;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
-import com.zjgsu.lht.client.DishFeignClient;
-import com.zjgsu.lht.client.UserFeignClient;
 import com.zjgsu.lht.dto.OrderDtos;
 import com.zjgsu.lht.exception.ApiException;
-import com.zjgsu.lht.repository.OrderAttemptRepository;
 import com.zjgsu.lht.repository.OrderItemRepository;
 import com.zjgsu.lht.repository.OrderRepository;
 import com.zjgsu.lht.service.OrderService;
@@ -26,13 +23,13 @@ import java.math.BigDecimal;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -45,7 +42,7 @@ import static org.mockito.Mockito.when;
         "spring.cloud.openfeign.client.config.default.readTimeout=500"
 })
 @ActiveProfiles("test")
-class FeignClientTests {
+class FeignClientTest {
     private static final String SNAPSHOT =
             "[{\"dishId\":1,\"dishName\":\"鸡腿饭\",\"unitPrice\":12.50,\"quantity\":3}]";
     private static final ExecutorService HTTP_THREADS = Executors.newVirtualThreadPerTaskExecutor();
@@ -55,12 +52,9 @@ class FeignClientTests {
     private static final AtomicInteger FIRST_HITS = new AtomicInteger();
     private static final AtomicInteger SECOND_HITS = new AtomicInteger();
     private static final AtomicInteger DEDUCTIONS = new AtomicInteger();
-    private static final AtomicInteger RELEASES = new AtomicInteger();
     private static final AtomicInteger STOCK = new AtomicInteger();
-    private static final Map<String, String> OPERATIONS = new ConcurrentHashMap<>();
     private static volatile boolean malformedUser;
     private static volatile boolean slowDeduction;
-    private static volatile boolean failedRelease;
     private static final HttpServer USERS = start(true, new AtomicInteger());
     private static final HttpServer DISH_ONE = start(false, FIRST_HITS);
     private static final HttpServer DISH_TWO = start(false, SECOND_HITS);
@@ -71,12 +65,6 @@ class FeignClientTests {
     OrderRepository repository;
     @Autowired
     OrderItemRepository items;
-    @Autowired
-    OrderAttemptRepository attempts;
-    @Autowired
-    UserFeignClient users;
-    @Autowired
-    DishFeignClient dishes;
     @MockitoBean
     DiscoveryClient discovery;
 
@@ -84,16 +72,13 @@ class FeignClientTests {
     void reset() {
         items.deleteAll();
         repository.deleteAll();
-        attempts.deleteAll();
         USER_STATUS.set(200);
         DISH_STATUS.set(200);
         FIRST_HITS.set(0);
         SECOND_HITS.set(0);
         DEDUCTIONS.set(0);
-        RELEASES.set(0);
         STOCK.set(20);
-        OPERATIONS.clear();
-        malformedUser = slowDeduction = failedRelease = false;
+        malformedUser = slowDeduction = false;
         when(discovery.getInstances("user-service")).thenReturn(List.of(instance("u1", "user-service", USERS)));
         when(discovery.getInstances("dish-service")).thenReturn(List.of(
                 instance("d1", "dish-service", DISH_ONE), instance("d2", "dish-service", DISH_TWO)));
@@ -134,53 +119,31 @@ class FeignClientTests {
                     : "{\"code\":\"USER_NOT_FOUND\"}");
             return;
         }
+        if (!path.equals("/internal/stock/deduct") || !exchange.getRequestMethod().equals("POST")) {
+            send(exchange, 400, "{}");
+            return;
+        }
         if (DISH_STATUS.get() != 200) {
             send(exchange, DISH_STATUS.get(), "{\"code\":\"DISH_NOT_FOUND\"}");
             return;
         }
-        boolean validate = path.equals("/internal/dishes/validate");
-        boolean deduct = path.matches("/internal/stock-operations/[^/]+/deduct");
-        boolean release = path.matches("/internal/stock-operations/[^/]+/release");
-        if ((validate || deduct) && exchange.getRequestMethod().equals("POST")) {
-            var body = JSON.readTree(exchange.getRequestBody());
-            if (body.path("merchantId").asLong() != 10 || body.path("items").size() != 1
-                    || body.path("items").get(0).path("quantity").asInt() != 3) {
-                send(exchange, 400, "{}");
-                return;
-            }
-        } else if (!release || !exchange.getRequestMethod().equals("PUT")) {
+        var body = JSON.readTree(exchange.getRequestBody());
+        if (body.path("merchantId").asLong() != 10 || body.path("items").size() != 1
+                || body.path("items").get(0).path("dishId").asLong() != 1
+                || body.path("items").get(0).path("quantity").asInt() != 3) {
             send(exchange, 400, "{}");
             return;
         }
-        if (validate) {
-            send(exchange, 200, SNAPSHOT);
-            return;
-        }
-        String orderNo = path.split("/")[3];
-        if (deduct) {
-            DEDUCTIONS.incrementAndGet();
-            if (OPERATIONS.putIfAbsent(orderNo, "DEDUCTED") == null) STOCK.addAndGet(-3);
-            if (slowDeduction) {
-                try {
-                    Thread.sleep(1200); // Remote commit already happened; only the response is late.
-                } catch (InterruptedException interrupted) {
-                    Thread.currentThread().interrupt();
-                }
+        DEDUCTIONS.incrementAndGet();
+        STOCK.addAndGet(-3);
+        if (slowDeduction) {
+            try {
+                Thread.sleep(1500);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
             }
-            send(exchange, 201, operation(orderNo, "DEDUCTED", SNAPSHOT));
-        } else {
-            RELEASES.incrementAndGet();
-            if (failedRelease) {
-                send(exchange, 503, "{}");
-                return;
-            }
-            if ("DEDUCTED".equals(OPERATIONS.put(orderNo, "RELEASED"))) STOCK.addAndGet(3);
-            send(exchange, 200, operation(orderNo, "RELEASED", "[]"));
         }
-    }
-
-    private static String operation(String orderNo, String state, String snapshots) {
-        return "{\"orderNo\":\"" + orderNo + "\",\"status\":\"" + state + "\",\"items\":" + snapshots + "}";
+        send(exchange, 200, SNAPSHOT);
     }
 
     private static void send(HttpExchange exchange, int status, String value) throws IOException {
@@ -205,70 +168,65 @@ class FeignClientTests {
     }
 
     @Test
-    void realFeignContractsCreateJsonOrderAndUseBothInstances() {
-        var result = orders.createOrder(request());
-        assertEquals(new BigDecimal("37.50"), result.totalAmount());
-        assertEquals(3, orders.getOrder(result.orderNo()).items().getFirst().quantity());
-        assertEquals(17, STOCK.get());
-        assertEquals(1, DEDUCTIONS.get());
-        assertTrue(FIRST_HITS.get() > 0 && SECOND_HITS.get() > 0, "Both discovered instances must receive requests");
-        assertEquals(1, repository.count());
-        assertEquals("SUCCEEDED", attempts.findById(result.orderNo()).orElseThrow().status);
+    void realFeignContractsCreateOrdersAndUseBothInstances() {
+        for (int i = 0; i < 2; i++) {
+            var result = orders.createOrder(request());
+            assertEquals(new BigDecimal("37.50"), result.totalAmount());
+            assertEquals(3, orders.getOrder(result.orderNo(), request().userId(), false).items().getFirst().quantity());
+        }
+        assertEquals(14, STOCK.get());
+        assertEquals(2, DEDUCTIONS.get());
+        assertEquals(1, FIRST_HITS.get());
+        assertEquals(1, SECOND_HITS.get());
+        assertEquals(2, repository.count());
     }
 
     @Test
-    void noInstanceIs503AndStopsBeforeAnyWrite() {
+    void noUserInstanceStopsBeforeAnyWriteAndRecoveryAllowsNewOrder() {
         when(discovery.getInstances("user-service")).thenReturn(List.of());
-        fails("DEPENDENCY_UNAVAILABLE", 503);
-        assertEquals(0, attempts.count());
+        assertNull(fails("DEPENDENCY_UNAVAILABLE", 503).orderNo);
         assertEquals(0, FIRST_HITS.get() + SECOND_HITS.get());
+
+        when(discovery.getInstances("user-service")).thenReturn(List.of(instance("u2", "user-service", USERS)));
+        orders.createOrder(request());
+        assertEquals(1, repository.count());
+        assertEquals(1, DEDUCTIONS.get());
     }
 
     @Test
     void expected404IsDistinctFromServerFailure() {
         USER_STATUS.set(404);
-        fails("USER_NOT_FOUND", 404);
+        assertNull(fails("USER_NOT_FOUND", 404).orderNo);
         USER_STATUS.set(500);
-        fails("DEPENDENCY_UNAVAILABLE", 503);
-        assertEquals(0, attempts.count());
+        assertNull(fails("DEPENDENCY_UNAVAILABLE", 503).orderNo);
+        verify(discovery, never()).getInstances("dish-service");
     }
 
     @Test
-    void unavailableDishNeverCreatesAnOrderOrAttempt() {
+    void unavailableDishNeverCreatesAnOrder() {
         DISH_STATUS.set(503);
-        fails("DEPENDENCY_UNAVAILABLE", 503);
-        assertEquals(0, attempts.count());
+        var error = fails("DEPENDENCY_UNAVAILABLE", 503);
+        assertNotNull(error.orderNo);
+        assertEquals(1, FIRST_HITS.get() + SECOND_HITS.get());
         assertEquals(20, STOCK.get());
     }
 
     @Test
     void malformedJsonIsNotBusinessSuccess() {
         malformedUser = true;
-        fails("DEPENDENCY_BAD_RESPONSE", 502);
-        assertEquals(0, attempts.count());
+        assertNull(fails("DEPENDENCY_BAD_RESPONSE", 502).orderNo);
+        assertEquals(0, FIRST_HITS.get() + SECOND_HITS.get());
     }
 
     @Test
-    void writeCommittedBeforeTimeoutIsCompensatedWithoutRetry() {
+    void writeCommittedBeforeTimeoutIsNotRetriedOrReleased() {
         slowDeduction = true;
         var error = fails("DEPENDENCY_TIMEOUT", 504);
         assertNotNull(error.orderNo);
-        assertEquals(1, DEDUCTIONS.get(), "No automatic write retry");
-        assertEquals(1, RELEASES.get());
-        assertEquals("RELEASED", OPERATIONS.get(error.orderNo));
-        assertEquals(20, STOCK.get());
-        assertEquals("FAILED", attempts.findById(error.orderNo).orElseThrow().status);
-    }
-
-    @Test
-    void ambiguousWriteAndUnavailableCompensationRequireReconciliation() {
-        slowDeduction = true;
-        failedRelease = true;
-        var error = fails("ORDER_RECOVERY_REQUIRED", 503);
-        assertEquals("DEDUCTED", OPERATIONS.get(error.orderNo));
-        assertEquals(17, STOCK.get(), "503 must not be interpreted as remote write not executed");
+        assertTrue(error.getMessage().contains("人工核对"));
         assertEquals(1, DEDUCTIONS.get());
-        assertEquals("RECOVERY_REQUIRED", attempts.findById(error.orderNo).orElseThrow().status);
+        assertEquals(1, FIRST_HITS.get() + SECOND_HITS.get(), "No write retry or release");
+        assertEquals(17, STOCK.get(), "Timeout does not imply remote rollback");
     }
 
     @AfterAll

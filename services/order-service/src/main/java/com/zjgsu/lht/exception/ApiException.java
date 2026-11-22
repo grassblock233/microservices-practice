@@ -16,7 +16,4 @@ public class ApiException extends RuntimeException {
         this.orderNo = orderNo;
     }
 
-    public ApiException forOrder(String orderNo) {
-        return new ApiException(status, code, getMessage(), orderNo, this);
-    }
 }

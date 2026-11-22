@@ -1,10 +1,10 @@
 @nacosConsoleUrl = http://localhost:18080/
-@userBaseUrl = http://localhost:8081
-@dishBaseUrl = http://localhost:8082
-@orderBaseUrl = http://localhost:8083
+@gatewayUrl = http://localhost:8080
 @smokeUserId = student-1
 @smokeMerchantId = 10
 @smokeDishId = 1
+
+@studentPassword = 20261026
 
 ### 01 测试 Nacos 控制台可访问，并初始化本次测试
 < {%
@@ -23,38 +23,38 @@ GET {{nacosConsoleUrl}}
     });
 %}
 
-### 02 用户服务健康检查
-GET {{userBaseUrl}}/actuator/health
-Accept: application/json
+### 02 网关健康检查
+GET {{gatewayUrl}}/actuator/health
 
 > {%
-    client.test("用户服务健康状态为 UP", () => {
-        client.assert(response.status === 200);
+    client.test("网关健康检查", () => {
+        client.assert(response.status === 200 && response.body.status === "UP");
     });
 %}
 
-### 03 菜品服务健康检查
-GET {{dishBaseUrl}}/actuator/health
-Accept: application/json
+### 03 未登录访问订单
+GET {{gatewayUrl}}/api/orders?userId={{smokeUserId}}
 
 > {%
-    client.test("菜品服务健康状态为 UP", () => {
-        client.assert(response.status === 200);
-    });
+    client.test("匿名订单访问被拒绝", () => client.assert(response.status === 401));
 %}
 
-### 04 订单服务健康检查
-GET {{orderBaseUrl}}/actuator/health
-Accept: application/json
+### 04 学生登录
+POST {{gatewayUrl}}/api/auth/login
+Content-Type: application/json
+
+{"username":"student1","password":"{{studentPassword}}"}
 
 > {%
-    client.test("订单服务健康状态为 UP", () => {
-        client.assert(response.status === 200);
+    client.test("学生登录", () => {
+        client.assert(response.status === 200 && response.body.role === "STUDENT" && response.body.token);
+        client.global.set("studentToken", response.body.token);
     });
 %}
 
 ### 05 获取下单用户，确认未被禁用
-GET {{userBaseUrl}}/api/users/{{smokeUserId}}
+GET {{gatewayUrl}}/api/users/{{smokeUserId}}
+Authorization: Bearer {{studentToken}}
 Accept: application/json
 
 > {%
@@ -66,7 +66,8 @@ Accept: application/json
 %}
 
 ### 06 确认库存，保存下单前库存状态
-GET {{dishBaseUrl}}/api/dishes?merchantId={{smokeMerchantId}}
+GET {{gatewayUrl}}/api/dishes?merchantId={{smokeMerchantId}}
+Authorization: Bearer {{studentToken}}
 Accept: application/json
 
 > {%
@@ -80,7 +81,8 @@ Accept: application/json
 %}
 
 ### 07 保存下单前订单状态
-GET {{orderBaseUrl}}/api/orders?userId={{smokeUserId}}
+GET {{gatewayUrl}}/api/orders?userId={{smokeUserId}}
+Authorization: Bearer {{studentToken}}
 Accept: application/json
 
 > {%
@@ -91,7 +93,8 @@ Accept: application/json
 %}
 
 ### 08 创建订单(同一id商品两份)
-POST {{orderBaseUrl}}/api/orders
+POST {{gatewayUrl}}/api/orders
+Authorization: Bearer {{studentToken}}
 Content-Type: application/json
 Accept: application/json
 
@@ -124,7 +127,8 @@ Accept: application/json
 %}
 
 ### 09 查询订单详情
-GET {{orderBaseUrl}}/api/orders/{{smoke_orderNo}}
+GET {{gatewayUrl}}/api/orders/{{smoke_orderNo}}
+Authorization: Bearer {{studentToken}}
 Accept: application/json
 
 > {%
@@ -157,7 +161,8 @@ Accept: application/json
 %}
 
 ### 10 保存下单后订单列表，确认订单只增加一笔
-GET {{orderBaseUrl}}/api/orders?userId={{smokeUserId}}
+GET {{gatewayUrl}}/api/orders?userId={{smokeUserId}}
+Authorization: Bearer {{studentToken}}
 Accept: application/json
 
 > {%
@@ -171,7 +176,8 @@ Accept: application/json
 %}
 
 ### 11 保存下单后菜品列表，确认库存扣减两份
-GET {{dishBaseUrl}}/api/dishes?merchantId={{smokeMerchantId}}
+GET {{gatewayUrl}}/api/dishes?merchantId={{smokeMerchantId}}
+Authorization: Bearer {{studentToken}}
 Accept: application/json
 
 > {%
@@ -185,25 +191,9 @@ Accept: application/json
     });
 %}
 
-### 12 查询库存操作记录，核对扣减状态与价格快照
-GET {{dishBaseUrl}}/internal/stock-operations/{{smoke_orderNo}}
-Accept: application/json
-
-> {%
-    client.test("库存操作为 DEDUCTED，操作号及价格快照与订单一致", () => {
-        client.assert(response.status === 200, "预期 200，实际 " + response.status);
-        const detail = JSON.parse(client.global.get("smoke_detail"));
-        const operation = response.body;
-        client.assert(operation.orderNo === detail.orderNo && operation.status === "DEDUCTED", "库存操作号或状态不一致");
-        client.assert(Array.isArray(operation.items) && operation.items.length === 1, "库存操作应只有一条合并明细");
-        const item = operation.items[0];
-        client.assert(item.dishId === detail.items[0].dishId && item.quantity === 2, "库存操作的菜品或数量不一致");
-        client.assert(item.unitPrice === detail.items[0].unitPrice, "扣减价格快照与订单快照不一致");
-    });
-%}
-
-### 13 用户不存在：预期 404 / USER_NOT_FOUND
-POST {{orderBaseUrl}}/api/orders
+### 13 尝试替不存在的用户下单：预期 403 / FORBIDDEN
+POST {{gatewayUrl}}/api/orders
+Authorization: Bearer {{studentToken}}
 Content-Type: application/json
 Accept: application/json
 
@@ -226,14 +216,15 @@ Accept: application/json
 
 > {%
     client.test("不存在的用户被拒绝", () => {
-        client.assert(response.status === 404);
-        client.assert(response.body.code === "USER_NOT_FOUND");
+        client.assert(response.status === 403);
+        client.assert(response.body.code === "FORBIDDEN");
         client.global.set("smoke_missingUserRejected", "true");
     });
 %}
 
-### 14 用户已禁用：预期 409 / USER_DISABLED
-POST {{orderBaseUrl}}/api/orders
+### 14 尝试替禁用用户下单：预期 403 / FORBIDDEN
+POST {{gatewayUrl}}/api/orders
+Authorization: Bearer {{studentToken}}
 Content-Type: application/json
 Accept: application/json
 
@@ -256,14 +247,15 @@ Accept: application/json
 
 > {%
     client.test("禁用用户被拒绝", () => {
-        client.assert(response.status === 409);
-        client.assert(response.body.code === "USER_DISABLED");
+        client.assert(response.status === 403);
+        client.assert(response.body.code === "FORBIDDEN");
         client.global.set("smoke_disabledUserRejected", "true");
     });
 %}
 
 ### 15 菜品不存在：预期 404 / DISH_NOT_FOUND
-POST {{orderBaseUrl}}/api/orders
+POST {{gatewayUrl}}/api/orders
+Authorization: Bearer {{studentToken}}
 Content-Type: application/json
 Accept: application/json
 
@@ -284,12 +276,14 @@ Accept: application/json
     client.test("不存在的菜品被拒绝", () => {
         client.assert(response.status === 404);
         client.assert(response.body.code === "DISH_NOT_FOUND");
+        client.assert(typeof response.body.orderNo === "string" && response.body.orderNo.length === 36);
         client.global.set("smoke_missingDishRejected", "true");
     });
 %}
 
 ### 16 异常下单后订单列表应完全不变
-GET {{orderBaseUrl}}/api/orders?userId={{smokeUserId}}
+GET {{gatewayUrl}}/api/orders?userId={{smokeUserId}}
+Authorization: Bearer {{studentToken}}
 Accept: application/json
 
 > {%
@@ -302,7 +296,8 @@ Accept: application/json
 %}
 
 ### 17 异常下单后菜品列表应完全不变
-GET {{dishBaseUrl}}/api/dishes?merchantId={{smokeMerchantId}}
+GET {{gatewayUrl}}/api/dishes?merchantId={{smokeMerchantId}}
+Authorization: Bearer {{studentToken}}
 Accept: application/json
 
 > {%

@@ -37,6 +37,4 @@ public class StockDtos {
     public record Snapshot(Long dishId, String dishName, BigDecimal unitPrice, Integer quantity) {
     }
 
-    public record Operation(String orderNo, String status, List<Snapshot> items) {
-    }
 }

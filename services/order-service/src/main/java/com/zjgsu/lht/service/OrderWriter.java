@@ -4,11 +4,9 @@ import com.zjgsu.lht.dto.OrderDtos;
 import com.zjgsu.lht.dto.StockDtos;
 import com.zjgsu.lht.model.Order;
 import com.zjgsu.lht.model.OrderItem;
-import com.zjgsu.lht.repository.OrderAttemptRepository;
 import com.zjgsu.lht.repository.OrderItemRepository;
 import com.zjgsu.lht.repository.OrderRepository;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
@@ -19,15 +17,13 @@ import java.util.List;
 public class OrderWriter {
     private final OrderRepository orders;
     private final OrderItemRepository items;
-    private final OrderAttemptRepository attempts;
 
-    public OrderWriter(OrderRepository orders, OrderItemRepository items, OrderAttemptRepository attempts) {
+    public OrderWriter(OrderRepository orders, OrderItemRepository items) {
         this.orders = orders;
         this.items = items;
-        this.attempts = attempts;
     }
 
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    @Transactional
     public OrderDtos.Response save(String id, OrderDtos.Request r, List<StockDtos.Snapshot> snapshots) {
         var total = snapshots.stream().map(s -> s.unitPrice().multiply(BigDecimal.valueOf(s.quantity())))
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
@@ -51,15 +47,6 @@ public class OrderWriter {
             items.save(i);
         }
         items.flush();
-        var a = attempts.findById(id).orElseThrow();
-        a.status = "SUCCEEDED";
-        a.updatedAt = LocalDateTime.now();
-        attempts.saveAndFlush(a);
         return new OrderDtos.Response(id, total, o.getStatus());
-    }
-
-    @Transactional(readOnly = true, propagation = Propagation.REQUIRES_NEW)
-    public java.util.Optional<OrderDtos.Response> committed(String id) {
-        return orders.findByOrderNo(id).map(o -> new OrderDtos.Response(id, o.getTotalAmount(), o.getStatus()));
     }
 }

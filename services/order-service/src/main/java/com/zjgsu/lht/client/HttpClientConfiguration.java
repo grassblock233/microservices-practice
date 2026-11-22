@@ -8,7 +8,6 @@ import org.springframework.context.annotation.Configuration;
 public class HttpClientConfiguration {
     @Bean
     Retryer feignRetryer() {
-        // A timed-out write may have committed. Recovery uses the existing orderNo.
         return Retryer.NEVER_RETRY;
     }
 }

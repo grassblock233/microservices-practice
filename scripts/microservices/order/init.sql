@@ -35,19 +35,6 @@ CREATE TABLE IF NOT EXISTS order_items (
     CONSTRAINT ck_order_items_subtotal CHECK (subtotal >= 0)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-
-CREATE TABLE order_attempts (
- order_no VARCHAR(36) NOT NULL PRIMARY KEY,
- user_id VARCHAR(64) NOT NULL,
- merchant_id BIGINT NOT NULL,
- request_items TEXT NOT NULL,
- status VARCHAR(32) NOT NULL,
- error_code VARCHAR(64),
- failure_detail VARCHAR(1000),
- updated_at DATETIME(6) NOT NULL,
- KEY idx_attempt_status_time (status,updated_at),
- CONSTRAINT ck_attempt_status CHECK (status IN ('PROCESSING','SUCCEEDED','FAILED','RECOVERY_REQUIRED'))
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 INSERT INTO orders
     (id, order_no, user_id, merchant_id, status, total_amount, delivery_address, remark, created_at) VALUES
     (1, '00000000-0000-4000-8000-000000000001', 'student-1', 10,

@@ -3,14 +3,15 @@
 # 严格模式，脚本在出错时直接退出
 set -euo pipefail
 # 检查 python 和 curl 是否安装
-for command in curl python3; do
+for command in curl python3 docker; do
   command -v "$command" >/dev/null || { echo "Missing command: $command" >&2; exit 1; }
 done
 # 读取环境变量
 NACOS_CONSOLE_URL=${NACOS_CONSOLE_URL:-http://localhost:18080/}
-USER_BASE_URL=${USER_BASE_URL:-http://localhost:8081}
-DISH_BASE_URL=${DISH_BASE_URL:-http://localhost:8082}
-ORDER_BASE_URL=${ORDER_BASE_URL:-http://localhost:8083}
+ROOT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+source "$ROOT_DIR/scripts/auth-test.sh"
+DC=(docker compose --project-directory "$ROOT_DIR" -f "$ROOT_DIR/compose.yaml")
+GATEWAY_URL=${GATEWAY_URL:-http://localhost:8080}
 SMOKE_USER_ID=${SMOKE_USER_ID:-student-1}
 SMOKE_MERCHANT_ID=${SMOKE_MERCHANT_ID:-10}
 SMOKE_DISH_ID=${SMOKE_DISH_ID:-1}
@@ -24,7 +25,9 @@ request() {
   local expected=$1 method=$2 url=$3 destination=$4
   shift 4
   local actual
-  actual=$(curl --silent --show-error --location --connect-timeout 5 --max-time 30 \
+  local auth=()
+  if [[ "$url" == "$GATEWAY_URL/api/"* ]]; then auth=(-H "Authorization: Bearer $student_token"); fi
+  actual=$(curl --silent --show-error --connect-timeout 5 --max-time 30 "${auth[@]}" \
     --request "$method" --output "$destination" --write-out '%{http_code}' "$url" "$@")
   echo "$method $url -> HTTP $actual (expected $expected)"
   if [[ "$actual" != "$expected" ]]; then
@@ -35,18 +38,22 @@ request() {
 
 # 检查 Nacos 控制台是否可访问，以及业务服务的健康状态是否为 UP。
 request 200 GET "$NACOS_CONSOLE_URL" "$work_dir/nacos-console.html"
-for base in "$USER_BASE_URL" "$DISH_BASE_URL" "$ORDER_BASE_URL"; do
-  request 200 GET "$base/actuator/health" "$work_dir/health.json"
+request 200 GET "$GATEWAY_URL/actuator/health" "$work_dir/health.json"
+for service in user-service:8081 dish-service:8082 order-service:8083; do
+  "${DC[@]}" exec -T --index 1 "${service%:*}" curl -fsS --max-time 10 \
+    "http://127.0.0.1:${service#*:}/actuator/health" > "$work_dir/health.json"
   python3 - "$work_dir/health.json" <<'PY'
 import json,sys
 assert json.load(open(sys.argv[1]))['status']=='UP', 'Health is not UP'
 PY
 done
 
+student_token=$(gateway_student_token) || { echo 'FAIL 学生登录失败，无法继续冒烟测试' >&2; exit 1; }
+
 # 获取用户信息，以及下单前的菜品库存和订单列表，供后续校验使用。
-request 200 GET "$USER_BASE_URL/api/users/$SMOKE_USER_ID" "$work_dir/user.json"
-request 200 GET "$DISH_BASE_URL/api/dishes?merchantId=$SMOKE_MERCHANT_ID" "$work_dir/before-dishes.json"
-request 200 GET "$ORDER_BASE_URL/api/orders?userId=$SMOKE_USER_ID" "$work_dir/before-orders.json"
+request 200 GET "$GATEWAY_URL/api/users/$SMOKE_USER_ID" "$work_dir/user.json"
+request 200 GET "$GATEWAY_URL/api/dishes?merchantId=$SMOKE_MERCHANT_ID" "$work_dir/before-dishes.json"
+request 200 GET "$GATEWAY_URL/api/orders?userId=$SMOKE_USER_ID" "$work_dir/before-orders.json"
 # 确认用户可用且菜品库存至少为两份，构造同一菜品分两行、每行一份的下单请求。
 python3 - "$work_dir" "$SMOKE_USER_ID" "$SMOKE_MERCHANT_ID" "$SMOKE_DISH_ID" <<'PY'
 import json,sys
@@ -61,7 +68,7 @@ body=dict(userId=user,merchantId=merchant,items=[dict(dishId=dish,quantity=1),di
 PY
 
 # 提交订单并校验创建成功。
-request 201 POST "$ORDER_BASE_URL/api/orders" "$work_dir/created.json" \
+request 201 POST "$GATEWAY_URL/api/orders" "$work_dir/created.json" \
   -H 'Content-Type: application/json' --data-binary "@$work_dir/request.json"
 # 提取订单号，并验证其符合 UUID 格式。
 order_no=$(python3 - "$work_dir/created.json" <<'PY'
@@ -70,13 +77,12 @@ n=json.load(open(sys.argv[1]))['orderNo'];uuid.UUID(n);print(n)
 PY
 )
 
-# 查询订单详情、下单后的订单与库存，以及对应的库存扣减操作记录。
-request 200 GET "$ORDER_BASE_URL/api/orders/$order_no" "$work_dir/detail.json"
-request 200 GET "$ORDER_BASE_URL/api/orders?userId=$SMOKE_USER_ID" "$work_dir/after-orders.json"
-request 200 GET "$DISH_BASE_URL/api/dishes?merchantId=$SMOKE_MERCHANT_ID" "$work_dir/after-dishes.json"
-request 200 GET "$DISH_BASE_URL/internal/stock-operations/$order_no" "$work_dir/operation.json"
+# 查询订单详情及下单后的订单和库存。
+request 200 GET "$GATEWAY_URL/api/orders/$order_no" "$work_dir/detail.json"
+request 200 GET "$GATEWAY_URL/api/orders?userId=$SMOKE_USER_ID" "$work_dir/after-orders.json"
+request 200 GET "$GATEWAY_URL/api/dishes?merchantId=$SMOKE_MERCHANT_ID" "$work_dir/after-dishes.json"
 
-# 校验库存扣减、重复菜品合并、订单状态、金额快照、扣减记录及订单数量变化。
+# 校验库存扣减、重复菜品合并、订单状态、金额快照及订单数量变化。
 python3 - "$work_dir" "$SMOKE_DISH_ID" <<'PY'
 import json,sys
 from pathlib import Path
@@ -86,19 +92,19 @@ p=Path(sys.argv[1]);dish=int(sys.argv[2])
 def read(f):return json.loads((p/f).read_text(),parse_float=Decimal)
 before=next(x for x in read('before-dishes.json') if x['id']==dish)
 after=next(x for x in read('after-dishes.json') if x['id']==dish)
-created,detail,operation=read('created.json'),read('detail.json'),read('operation.json')
+created,detail=read('created.json'),read('detail.json')
 assert before['stock']-after['stock']==2, 'Stock did not decrease by two'
 assert created['status']==detail['status']=='PENDING_PAYMENT'
 assert len(detail['items'])==1 and detail['items'][0]['quantity']==2
 snapshot=detail['items'][0]
 assert created['totalAmount']==detail['totalAmount']==snapshot['unitPrice']*2==snapshot['subtotal']
-assert operation['orderNo']==created['orderNo'] and operation['status']=='DEDUCTED'
-assert operation['items'][0]['unitPrice']==snapshot['unitPrice']
+assert detail['orderNo']==created['orderNo']
+assert snapshot['dishId']==dish and snapshot['dishName']==before['name'] and snapshot['unitPrice']==before['price']
 assert len(read('after-orders.json'))==len(read('before-orders.json'))+1
 print(f"PASS orderNo={created['orderNo']} amount={created['totalAmount']} stock={before['stock']}->{after['stock']}")
 PY
 
-# 构造用户不存在、用户已停用及菜品不存在的请求，验证异常下单场景。
+# 验证跨用户下单被拒绝，以及本人下单时菜品不存在仍返回业务错误。
 python3 - "$work_dir" <<'PY'
 import json,sys,uuid
 from pathlib import Path
@@ -112,22 +118,25 @@ PY
 # 逐一校验异常请求的 HTTP 状态码和业务错误码。
 for scenario in missing-user disabled-user missing-dish; do
   case "$scenario" in
-    missing-user) expected=404; code=USER_NOT_FOUND ;;
-    disabled-user) expected=409; code=USER_DISABLED ;;
+    missing-user) expected=403; code=FORBIDDEN ;;
+    disabled-user) expected=403; code=FORBIDDEN ;;
     missing-dish) expected=404; code=DISH_NOT_FOUND ;;
   esac
-  request "$expected" POST "$ORDER_BASE_URL/api/orders" "$work_dir/error.json" \
+  request "$expected" POST "$GATEWAY_URL/api/orders" "$work_dir/error.json" \
     -H 'Content-Type: application/json' --data-binary "@$work_dir/$scenario.json"
   python3 - "$work_dir/error.json" "$code" <<'PY'
 import json,sys
 body=json.load(open(sys.argv[1]));assert body['code']==sys.argv[2],body
+if body['code']=='DISH_NOT_FOUND':
+ from uuid import UUID
+ UUID(body['orderNo'])
 print('PASS rejected '+body['code'])
 PY
 done
 
 # 对比异常请求前后的订单和菜品数据，确保拒绝下单不会产生订单或改变库存。
-request 200 GET "$ORDER_BASE_URL/api/orders?userId=$SMOKE_USER_ID" "$work_dir/final-orders.json"
-request 200 GET "$DISH_BASE_URL/api/dishes?merchantId=$SMOKE_MERCHANT_ID" "$work_dir/final-dishes.json"
+request 200 GET "$GATEWAY_URL/api/orders?userId=$SMOKE_USER_ID" "$work_dir/final-orders.json"
+request 200 GET "$GATEWAY_URL/api/dishes?merchantId=$SMOKE_MERCHANT_ID" "$work_dir/final-dishes.json"
 python3 - "$work_dir" <<'PY'
 import json,sys
 from pathlib import Path

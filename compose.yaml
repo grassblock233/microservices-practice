@@ -54,9 +54,11 @@ services:
   user-service:
     build:
       context: ./services/user-service
-    ports: ["8081:8081"]
     environment:
       SERVER_PORT: 8081
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+      DEMO_STUDENT_PASSWORD: ${DEMO_STUDENT_PASSWORD:-}
+      DEMO_ADMIN_PASSWORD: ${DEMO_ADMIN_PASSWORD:-}
       DB_URL: jdbc:mysql://user-db:3306/campus_user
       DB_USERNAME: user_app
       DB_PASSWORD: ${USER_DB_PASSWORD:?Set USER_DB_PASSWORD in .env}
@@ -96,7 +98,6 @@ services:
   dish-service:
     build:
       context: ./services/dish-service
-    ports: ["8082:8082"]
     environment:
       SERVER_PORT: 8082
       DB_URL: jdbc:mysql://dish-db:3306/campus_dish
@@ -138,7 +139,6 @@ services:
   order-service:
     build:
       context: ./services/order-service
-    ports: ["8083:8083"]
     environment:
       SERVER_PORT: 8083
       DB_URL: jdbc:mysql://order-db:3306/campus_order
@@ -158,6 +158,33 @@ services:
       user-service:
         condition: service_healthy
       dish-service:
+        condition: service_healthy
+    networks: [campus-network]
+
+  gateway-service:
+    build:
+      context: .
+      dockerfile: services/gateway-service/Dockerfile
+    ports: ["${GATEWAY_PORT:-8080}:8080"]
+    environment:
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+      NACOS_SERVER_ADDR: nacos:8848
+      NACOS_USERNAME: ${NACOS_USERNAME:-nacos}
+      NACOS_PASSWORD: ${NACOS_PASSWORD:?Set NACOS_PASSWORD in .env}
+      NACOS_NAMESPACE: ${NACOS_NAMESPACE:-}
+      SPRING_APPLICATION_JSON: >-
+        {"spring":{"cloud":{"gateway":{"server":{"webflux":{"routes":[
+          {"id":"login","uri":"lb://user-service","predicates":["Method=POST","Path=/api/auth/login,false"]},
+          {"id":"users","uri":"lb://user-service","predicates":["Method=GET","Path=/api/users/{userId},false"]},
+          {"id":"dishes","uri":"lb://dish-service","predicates":["Method=GET","Path=/api/dishes,false"]},
+          {"id":"orders","uri":"lb://order-service","predicates":["Method=GET,POST","Path=/api/orders,/api/orders/{orderNo},false"]}
+        ]}}}}}}
+    depends_on:
+      user-service:
+        condition: service_healthy
+      dish-service:
+        condition: service_healthy
+      order-service:
         condition: service_healthy
     networks: [campus-network]
 

@@ -5,7 +5,7 @@ usage() {
   cat <<'HELP'
 用法：bash scripts/reset-microservices.sh [--yes] [--dry-run]
 
-停止三个业务服务，删除三个数据库容器及其数据卷，再启动并恢复初始示例数据。
+停止网关和三个业务服务，删除三个数据库容器及其数据卷，再启动并恢复初始示例数据。
 所有业务数据都会丢失；Nacos 数据和管理员账号、旧单体数据库不受影响。
 默认交互确认；从任意目录执行均使用本仓库的 compose.yaml 和 .env。
 可通过 COMPOSE_PROJECT_NAME 指定项目名，与启动服务时保持一致。
@@ -87,7 +87,7 @@ fi
 docker info >/dev/null
 trap 'echo "重置中断：请检查上方错误；业务服务可能仍处于停止状态。" >&2' ERR
 echo "[1/4] 停止业务服务……"
-"${compose[@]}" stop order-service dish-service user-service
+"${compose[@]}" stop gateway-service order-service dish-service user-service
 echo "[2/4] 删除数据库容器……"
 "${compose[@]}" rm -sf user-db dish-db order-db
 echo "[3/4] 删除业务数据卷……"
